@@ -501,7 +501,7 @@ fn retrieve_surfaces(
 /// enabled: until then `xrLocateSpace` reports no valid pose, and every Scene
 /// entity was dropped (only the fallback floor survived). The enable is
 /// asynchronous; `locate_surfaces` picks the entities up once it lands.
-fn enable_locatable(instance: &OxrInstance, space: sys::Space) {
+pub(crate) fn enable_locatable(instance: &OxrInstance, space: sys::Space) {
     let Some(fp) = instance.exts().fb_spatial_entity.as_ref() else {
         return;
     };
@@ -850,7 +850,7 @@ fn to_box(pose: sys::Posef, volume: sys::Rect3DfFB) -> Option<Shape> {
     })
 }
 
-fn cvt(x: sys::Result) -> Result<sys::Result, sys::Result> {
+pub(crate) fn cvt(x: sys::Result) -> Result<sys::Result, sys::Result> {
     if x.into_raw() >= 0 { Ok(x) } else { Err(x) }
 }
 

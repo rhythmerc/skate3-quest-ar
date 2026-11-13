@@ -1,8 +1,9 @@
 //! The placed pieces, saved next to the assets folder (on Quest, the app's
 //! external files directory) whenever the layout changes and loaded at
-//! startup. Poses are in STAGE space, which Quest keeps for the same
-//! Guardian, so pieces come back on the same tables. The world scale and
-//! the park scale chosen in build mode are saved with them.
+//! startup. Poses are in STAGE space, with the spatial anchor that says
+//! where in the room that was (`anchor`), so pieces come back on the same
+//! tables. The world scale and the park scale chosen in build mode are
+//! saved with them.
 use super::{MAX_PARK_SCALE, MAX_SCALE, MIN_PARK_SCALE, MIN_SCALE, Placed, PlacedPieces};
 use crate::xr::rig::Rig;
 use crate::xr::XrFiles;
@@ -22,13 +23,16 @@ struct Layout {
     /// Size of the pieces relative to their authored size; absent before 0.03.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     park_scale: Option<f32>,
+    /// The anchor the poses are by; absent before there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<super::anchor::AnchorRecord>,
 }
 
 fn path(files: &XrFiles) -> PathBuf {
     files.0.join("ar-layout.json")
 }
 
-pub(super) fn load(files: Res<XrFiles>, mut placed: ResMut<PlacedPieces>, mut rig: ResMut<Rig>) {
+pub(super) fn load(files: Res<XrFiles>, mut placed: ResMut<PlacedPieces>, mut rig: ResMut<Rig>, mut anchor: ResMut<super::anchor::ParkAnchor>) {
     let path = path(&files);
     let Ok(bytes) = std::fs::read(&path) else {
         return;
@@ -37,6 +41,7 @@ pub(super) fn load(files: Res<XrFiles>, mut placed: ResMut<PlacedPieces>, mut ri
         Ok(layout) if layout.version == VERSION => {
             info!("BUILD loaded {} pieces from {}", layout.pieces.len(), path.display());
             placed.items = layout.pieces;
+            anchor.record = layout.anchor;
             for item in &mut placed.items {
                 item.scale = super::snap_scale(item.scale);
             }
@@ -57,7 +62,13 @@ pub(super) fn load(files: Res<XrFiles>, mut placed: ResMut<PlacedPieces>, mut ri
 
 /// Write on every committed edit (not while a piece is being dragged). The
 /// first run only records the loaded revision.
-pub(super) fn save(files: Res<XrFiles>, placed: Res<PlacedPieces>, rig: Res<Rig>, mut saved: Local<Option<u64>>) {
+pub(super) fn save(
+    files: Res<XrFiles>,
+    placed: Res<PlacedPieces>,
+    rig: Res<Rig>,
+    anchor: Res<super::anchor::ParkAnchor>,
+    mut saved: Local<Option<u64>>,
+) {
     if placed.busy() || *saved == Some(placed.revision) {
         return;
     }
@@ -70,6 +81,7 @@ pub(super) fn save(files: Res<XrFiles>, placed: Res<PlacedPieces>, rig: Res<Rig>
         pieces: placed.items.clone(),
         scale: Some(rig.scale),
         park_scale: Some(placed.park_scale),
+        anchor: anchor.record.clone(),
     };
     let result = serde_json::to_vec_pretty(&layout)
         .map_err(|e| e.to_string())
@@ -107,15 +119,18 @@ mod tests {
             }],
             scale: Some(8.0),
             park_scale: Some(1.5),
+            anchor: Some(crate::xr::build::anchor::AnchorRecord { uuid: "000102030405060708090a0b0c0d0e0f".into(), position: [0.5, 0.0, -1.0], yaw: 0.25 }),
         };
         let json = serde_json::to_vec(&layout).unwrap();
         let back: Layout = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.pieces, layout.pieces);
         assert_eq!(back.scale, Some(8.0));
         assert_eq!(back.park_scale, Some(1.5));
+        assert_eq!(back.anchor, layout.anchor);
         let old: Layout = serde_json::from_str(r#"{"version":1,"pieces":[]}"#).unwrap();
         assert_eq!(old.scale, None, "layouts from before the scale still load");
         assert_eq!(old.park_scale, None);
+        assert_eq!(old.anchor, None, "and are given an anchor");
         let old: Layout = serde_json::from_str(
             r#"{"version":1,"pieces":[{"id":1,"piece":{"kind":"Rail","size":1.0},"position":[0,0,0],"yaw":0}]}"#,
         )

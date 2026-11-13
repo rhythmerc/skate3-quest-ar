@@ -29,6 +29,7 @@
 //! in tracking (STAGE) space, so they stay on the same real table, and are
 //! saved between launches ([`layout`]). Their collision and grind rails are
 //! built by `xr::real_world`.
+mod anchor;
 mod layout;
 mod legend;
 pub(crate) mod pieces;
@@ -513,6 +514,7 @@ impl Plugin for BuildPlugin {
                     .run_if(openxr_session_running),
             )
             .add_plugins(legend::LegendPlugin)
+            .add_plugins(anchor::AnchorPlugin)
             .add_systems(Update, (sync_pieces, show_build, show_edit, show_drawn, describe, layout::save, drop_after_park_scale));
     }
 }
