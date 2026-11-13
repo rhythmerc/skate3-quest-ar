@@ -523,9 +523,7 @@ impl Piece {
                     Vec3::new(radius * (a.cos() - 0.5), top, radius * (a.sin() - 0.5))
                 };
                 let points: Vec<Vec3> = (0..=segments).map(point).collect();
-                for pair in points.windows(2) {
-                    level_tube_quads(&mut g.rail_quads, pair[0], pair[1], tube);
-                }
+                swept_tube(&mut g.rail_quads, &points, tube);
                 for p in [points[1], points[segments / 2], points[segments - 1]] {
                     box_quads(&mut g.quads, Vec3::new(p.x - 0.04, -lift.max(0.0), p.z - 0.04), Vec3::new(p.x + 0.04, top - tube, p.z + 0.04));
                 }
@@ -800,22 +798,6 @@ fn push_with_uv(g: &mut PieceGeometry, quad: [Vec3; 4], uv: [Vec2; 4], outward: 
     }
 }
 
-/// A square grind tube whose top centre line runs level from `a` to `b` (any
-/// direction over the ground), `size` thick.
-fn level_tube_quads(out: &mut Vec<[Vec3; 4]>, a: Vec3, b: Vec3, size: f32) {
-    let along = (b - a) * 0.5;
-    let side = along.normalize().cross(Vec3::Y).normalize() * size * 0.5;
-    let centre = (a + b) * 0.5 - Vec3::Y * size * 0.5;
-    let axes = [side, Vec3::Y * size * 0.5, along];
-    for i in 0..3 {
-        let (aj, ak) = (axes[(i + 1) % 3], axes[(i + 2) % 3]);
-        for sign in [1.0, -1.0] {
-            let c = centre + axes[i] * sign;
-            push(out, [c - aj - ak, c + aj - ak, c + aj + ak, c - aj + ak], axes[i] * sign);
-        }
-    }
-}
-
 /// A square grind tube whose top centre line runs from `a` to `b` (any slope
 /// in the y-z plane), `size` thick.
 fn tube_quads(out: &mut Vec<[Vec3; 4]>, a: Vec3, b: Vec3, size: f32) {
@@ -831,6 +813,55 @@ fn tube_quads(out: &mut Vec<[Vec3; 4]>, a: Vec3, b: Vec3, size: f32) {
             push(out, [c - aj - ak, c + aj - ak, c + aj + ak, c - aj + ak], axes[i] * sign);
         }
     }
+}
+
+/// One square tube whose top centre line runs through `points`: its four
+/// sides from point to point, and an end face at the first and the last
+/// only. (A tube a stretch, each with its own ends, leaves faces across the
+/// rail at every point along it, which a board sliding along it catches.)
+pub(super) fn swept_tube(out: &mut Vec<[Vec3; 4]>, points: &[Vec3], size: f32) {
+    // Points on a straight line with their neighbours add nothing.
+    let mut line: Vec<Vec3> = Vec::with_capacity(points.len());
+    for (i, &p) in points.iter().enumerate() {
+        if let (Some(&before), Some(&after)) = (line.last(), points.get(i + 1)) {
+            if before.distance(p) < 1e-4 {
+                continue;
+            }
+            if i > 0 && (p - before).normalize().dot((after - p).normalize_or_zero()) > 1.0 - 1e-6 {
+                continue;
+            }
+        }
+        line.push(p);
+    }
+    if line.len() < 2 {
+        return;
+    }
+    let last = line.len() - 1;
+    // Each point's section: the two top corners, then the two under them,
+    // across the direction the tube turns through there.
+    let section = |i: usize| {
+        let before = (line[i] - line[i.saturating_sub(1)]).normalize_or_zero();
+        let after = (line[(i + 1).min(last)] - line[i]).normalize_or_zero();
+        let forward = (before + after).normalize_or(if i == 0 { after } else { before });
+        let side = forward.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+        let up = side.cross(forward).normalize();
+        // (as wide through a turn as along the straights)
+        let half_turn = forward.dot(if i == last { before } else { after }).abs().clamp(0.5, 1.0);
+        let across = side * (size * 0.5 / half_turn);
+        ([line[i] + across, line[i] - across, line[i] - across - up * size, line[i] + across - up * size], forward, side, up)
+    };
+    let (first, back, ..) = section(0);
+    push(out, first, -back);
+    for i in 0..last {
+        let (a, _, side, up) = section(i);
+        let (b, ..) = section(i + 1);
+        push(out, [a[0], a[1], b[1], b[0]], up);
+        push(out, [a[3], a[2], b[2], b[3]], -up);
+        push(out, [a[0], a[3], b[3], b[0]], side);
+        push(out, [a[1], a[2], b[2], b[1]], -side);
+    }
+    let (end, forward, ..) = section(last);
+    push(out, end, forward);
 }
 
 /// Six faces of an axis-aligned box, bottom included (rail tubes float).

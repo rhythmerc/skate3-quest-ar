@@ -10,7 +10,7 @@
 //!
 //! Outlines are filled from their middle, so a pad or bowl should be a
 //! shape whose middle sees all of its edge (no hooks or hourglasses).
-use super::{MAX_SIZE, MIN_SIZE, Piece, PieceGeometry, PieceKind, box_quads, push};
+use super::{MAX_SIZE, MIN_SIZE, Piece, PieceGeometry, PieceKind, box_quads, push, swept_tube};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::FRAC_PI_2;
@@ -223,28 +223,9 @@ impl Path {
     }
 }
 
-/// A square tube whose top centre line runs from `a` to `b`, any way.
-fn tube(out: &mut Vec<[Vec3; 4]>, a: Vec3, b: Vec3) {
-    let along = (b - a) * 0.5;
-    let Some(forward) = along.try_normalize() else { return };
-    let side = forward.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
-    let up = side.cross(forward).normalize();
-    let centre = (a + b) * 0.5 - up * TUBE * 0.5;
-    let axes = [side * TUBE * 0.5, up * TUBE * 0.5, along];
-    for i in 0..3 {
-        let (aj, ak) = (axes[(i + 1) % 3], axes[(i + 2) % 3]);
-        for sign in [1.0, -1.0] {
-            let c = centre + axes[i] * sign;
-            push(out, [c - aj - ak, c + aj - ak, c + aj + ak, c - aj + ak], axes[i] * sign);
-        }
-    }
-}
-
 fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
     let top: Vec<Vec3> = line.iter().map(|s| s.p + Vec3::Y * RAIL_TOP).collect();
-    for pair in top.windows(2) {
-        tube(&mut g.rail_quads, pair[0], pair[1]);
-    }
+    swept_tube(&mut g.rail_quads, &top, TUBE);
     // A post under every node, and under the middle of a long stretch.
     let mut posts: Vec<Sample> = path.nodes.iter().map(|n| Sample { p: n.p(), base: n.base }).collect();
     for i in 0..path.stretches(false) {
@@ -511,6 +492,41 @@ mod tests {
         assert_eq!(g.quads.len(), 18);
         let last_post_foot = g.quads.iter().flatten().filter(|p| p.x > 5.5).map(|p| p.y).fold(f32::MAX, f32::min);
         assert!((last_post_foot - 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_rail_has_no_faces_across_it_but_its_two_ends() {
+        // Straight, level: nothing faces along it between x = 0 and 6.
+        let straight = Path { nodes: vec![node(0.0, 0.0, 0.0), node(6.0, 0.0, 0.0)], eased: false };
+        let g = straight.geometry(Piece::new(PieceKind::RailPath));
+        assert_eq!(g.rail_quads.len(), 6, "one box");
+        // Bent and rising: still only the two ends face along the rail.
+        let mut bent = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.0, 0.0), node(6.0, 1.0, 2.0), node(9.0, 1.0, 2.0)], eased: false };
+        bent.nodes[1].bend = [0.3, 0.4];
+        let g = bent.geometry(Piece::new(PieceKind::RailPath));
+        let line = &g.rails[0];
+        let mut across = 0;
+        for q in &g.rail_quads {
+            let normal = (quad_normal(q) + (q[3] - q[0]).cross(q[2] - q[0])).normalize();
+            let centre = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+            // The rail's direction where this face is.
+            let nearest = (0..line.len() - 1).min_by(|&a, &b| ((line[a] + line[a + 1]) * 0.5).distance(centre).total_cmp(&((line[b] + line[b + 1]) * 0.5).distance(centre))).unwrap();
+            let along = (line[nearest + 1] - line[nearest]).normalize();
+            if normal.dot(along).abs() > 0.7 {
+                across += 1;
+                assert!(centre.x < 0.05 || centre.x > 8.95, "a face across the rail at {centre}");
+            }
+        }
+        assert_eq!(across, 2);
+        // The top is one unbroken strip, 8 cm wide, under the grind line.
+        let tops: Vec<&[Vec3; 4]> = g.rail_quads.iter().filter(|q| quad_normal(q).normalize().y > 0.7).collect();
+        assert!(tops.len() >= 3);
+        for q in &tops {
+            for p in q.iter() {
+                let d = line.windows(2).map(|w| { let ab = w[1] - w[0]; (w[0] + ab * ((*p - w[0]).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)).distance(*p) }).fold(f32::MAX, f32::min);
+                assert!((d - TUBE * 0.5).abs() < 0.012, "{d}");
+            }
+        }
     }
 
     #[test]
