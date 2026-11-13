@@ -23,6 +23,7 @@ mod assets;
 mod binaural;
 mod clean_mix;
 mod clean_synth;
+mod reverb;
 #[cfg(feature = "retail")]
 mod camera;
 mod config;

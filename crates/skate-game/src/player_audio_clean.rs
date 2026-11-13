@@ -28,6 +28,7 @@ use skate_core::physics::phase::PhysicsEvent;
 use crate::binaural::{CleanPcm, Emitter, Voice};
 use crate::clean_mix::{Buffer, Strip, Tune, Tuning};
 use crate::clean_synth::{KINDS, RATE};
+use crate::reverb::{ReverbPcm, RoomFromWorld};
 #[cfg(feature = "retail")]
 use super::{FrontEndSoundRequest, PlayerAudioObservation};
 
@@ -201,7 +202,7 @@ struct CleanAudio {
     spatial: bool,
     /// The skater's latest world position, where spatial sounds are emitted.
     source: Vec3,
-    shots: Vec<(Shot, Vec<Handle<CleanPcm>>)>,
+    shots: Vec<(Shot, Vec<(Handle<CleanPcm>, Option<Arc<Voice>>)>)>,
     loops: Vec<(Loop, Entity, f32)>,
     /// Heard through Steam Audio's HRTF (`crate::binaural`): where the sounds are from the head,
     /// and each loop's voice (its pitch is the voice's, not the sink's).
@@ -240,6 +241,8 @@ pub(super) fn install(app: &mut App) {
     use bevy::audio::AddAudioSource;
     // (as `install_sk8`: `setup` makes its sounds as this source, in either tier)
     app.add_audio_source::<CleanPcm>()
+        .add_audio_source::<ReverbPcm>()
+        .init_resource::<RoomFromWorld>()
         .init_resource::<SurfaceHints>()
         .add_systems(Startup, setup)
         .add_systems(Update, (observe, frontend, lab, mix, follow_skater).chain());
@@ -277,6 +280,8 @@ pub(crate) struct Sk8Sounds {
 pub(crate) fn install_sk8(app: &mut App) {
     use bevy::audio::AddAudioSource;
     app.add_audio_source::<CleanPcm>()
+        .add_audio_source::<ReverbPcm>()
+        .init_resource::<RoomFromWorld>()
         .init_resource::<SurfaceHints>()
         .init_resource::<Sk8Sounds>()
         .add_systems(Startup, setup)
@@ -397,6 +402,7 @@ fn parse_wav(bytes: &[u8]) -> Option<(Vec<i16>, u16, u32)> {
 fn setup(
     mut commands: Commands,
     mut assets: ResMut<Assets<CleanPcm>>,
+    mut reverbs: ResMut<Assets<ReverbPcm>>,
     spatial: Option<Res<SpatialSkateAudio>>,
     file: Option<Res<TuningFile>>,
 ) {
@@ -442,7 +448,7 @@ fn setup(
                     .id();
                 loops.push((Loop::ALL[k], entity, 0.0));
             } else {
-                handles.push(handle);
+                handles.push((handle, voice));
             }
         }
         if !kind.looping {
@@ -452,7 +458,12 @@ fn setup(
         buffers.push(kind_buffers);
         recorded.push(kind_recorded);
     }
-    info!("SKATE_CLEAN_AUDIO loaded {count} sounds (spatial={spatial} hrtf={})", emitter.is_some());
+    // The room's answer to all of them: one source that never ends.
+    let room = emitter.as_ref().and_then(|_| crate::reverb::room());
+    if let Some(room) = room {
+        commands.spawn((AudioPlayer(reverbs.add(ReverbPcm(room.clone()))), PlaybackSettings::ONCE));
+    }
+    info!("SKATE_CLEAN_AUDIO loaded {count} sounds (spatial={spatial} hrtf={} reverb={})", emitter.is_some(), room.is_some());
     commands.insert_resource(SoundLab::load(file.map(|f| f.0.clone())));
     commands.insert_resource(CleanAudio {
         spatial,
@@ -516,16 +527,20 @@ impl CleanAudio {
         }
         self.last_pick[slot] = pick;
         let pitch = 0.96 + 0.08 * self.random();
-        let handle = self
+        let (handle, voice) = self
             .shots
             .iter()
             .find(|(s, _)| *s == shot)
             .map(|(_, v)| v[pick].clone())
             .expect("checked above");
+        let level = (gain * MASTER).clamp(0.0, 1.5);
+        if let Some(voice) = &voice {
+            voice.set_level(level);
+        }
         commands.spawn((
             AudioPlayer(handle),
             PlaybackSettings::DESPAWN
-                .with_volume(Volume::Linear((gain * MASTER).clamp(0.0, 1.5)))
+                .with_volume(Volume::Linear(level))
                 .with_speed(pitch)
                 .with_spatial(self.spatial),
             Transform::from_translation(self.source),
@@ -738,6 +753,9 @@ pub(crate) struct SoundLab {
     pub audition: bool,
     /// The pitch a held loop plays at (the game plays loops at 0.85 to 1.2 by speed).
     pub pitch: f32,
+    /// The room's reverberation: its level, and how absorbent the room is taken to be.
+    pub reverb: f32,
+    pub damping: f32,
     play: bool,
     path: Option<std::path::PathBuf>,
     now: f32,
@@ -777,6 +795,8 @@ impl SoundLab {
             solo: false,
             audition: false,
             pitch: 1.0,
+            reverb: tuning.reverb,
+            damping: tuning.damping,
             play: false,
             path,
             now: 0.0,
@@ -830,6 +850,14 @@ impl SoundLab {
         });
     }
 
+    /// Set the room's reverberation (saved).
+    pub(crate) fn set_reverb(&mut self, reverb: f32, damping: f32) {
+        if (self.reverb, self.damping) != (reverb, damping) {
+            (self.reverb, self.damping) = (reverb, damping);
+            self.save_wanted = Some(self.now);
+        }
+    }
+
     /// Play the selected hit once.
     pub(crate) fn play_once(&mut self) {
         self.play = true;
@@ -838,7 +866,7 @@ impl SoundLab {
     /// The file's contents: the kinds that are not as they come.
     fn tuning(&self) -> Tuning {
         let sounds = KINDS.iter().zip(&self.tunes).filter(|(_, tune)| **tune != Tune::default()).map(|(kind, tune)| (kind.name.to_string(), tune.clone()));
-        Tuning { sounds: sounds.collect() }
+        Tuning { sounds: sounds.collect(), reverb: self.reverb, damping: self.damping }
     }
 }
 
@@ -917,8 +945,16 @@ fn mix(
     listener: Query<&Transform, With<bevy::audio::SpatialListener>>,
     scale: Res<bevy::audio::DefaultSpatialScale>,
     lab: Option<Res<SoundLab>>,
+    room_from_world: Res<RoomFromWorld>,
 ) {
     let Some(mut audio) = audio else { return };
+    // Where the skater is in the real room, for its reverberation.
+    if let (Some(room), Some(to_room), Some(_)) = (crate::reverb::room(), room_from_world.0, &audio.emitter) {
+        room.set_source(to_room.transform_point3(audio.source));
+        if let Some(lab) = &lab {
+            room.set_mix(lab.reverb, lab.damping);
+        }
+    }
     // The sound lab holds the loop being tuned on, whatever the skater is doing.
     let held = lab.filter(|lab| lab.audition && lab.selected < Loop::ALL.len()).map(|lab| (lab.selected, lab.pitch));
     // Through the HRTF: where the skater is from the head, and as loud as the panned sounds were
@@ -941,6 +977,7 @@ fn mix(
         let speed = pitch.clamp(0.5, 2.0);
         if let Some(voice) = voices.get(i).and_then(Option::as_ref) {
             voice.set_pitch(speed);
+            voice.set_level(*volume * LOOP_GAIN * MASTER);
             if let Ok(mut sink) = sinks.get_mut(*entity) {
                 sink.set_volume(level);
             }

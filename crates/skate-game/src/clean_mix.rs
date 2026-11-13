@@ -56,10 +56,26 @@ impl Default for Tune {
 }
 
 /// `sound-tuning.json`: every kind that is not as it comes, by name.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Tuning {
     #[serde(default)]
     pub sounds: BTreeMap<String, Tune>,
+    /// The room's reverberation (`reverb`): its level against the sounds' own (1: as simulated).
+    #[serde(default = "one")]
+    pub reverb: f32,
+    /// How absorbent the room's surfaces are taken to be, against a generic room's (more: deader).
+    #[serde(default = "one")]
+    pub damping: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self { sounds: BTreeMap::new(), reverb: 1.0, damping: 1.0 }
+    }
 }
 
 #[derive(Clone, Copy)]

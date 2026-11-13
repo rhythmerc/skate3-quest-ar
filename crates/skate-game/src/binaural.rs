@@ -23,13 +23,13 @@ use std::time::Duration;
 
 /// Samples a binaural effect takes at a time (about 11 ms at 48 kHz: how late
 /// a turn of the head is heard).
-const FRAME: usize = 512;
+pub(crate) const FRAME: usize = 512;
 /// The version of the interface these declarations are of (4.8.1).
 const VERSION: u32 = (4 << 16) | (8 << 8) | 1;
 
 // ---------------------------------------------------------------- phonon.h (the part used)
 
-type Handle = *mut c_void;
+pub(crate) type Handle = *mut c_void;
 
 #[repr(C)]
 struct ContextSettings {
@@ -42,9 +42,9 @@ struct ContextSettings {
 }
 
 #[repr(C)]
-struct AudioSettings {
-    sampling_rate: i32,
-    frame_size: i32,
+pub(crate) struct AudioSettings {
+    pub sampling_rate: i32,
+    pub frame_size: i32,
 }
 
 #[repr(C)]
@@ -72,10 +72,10 @@ struct BinauralEffectParams {
 }
 
 #[repr(C)]
-struct AudioBuffer {
-    channels: i32,
-    samples: i32,
-    data: *mut *mut f32,
+pub(crate) struct AudioBuffer {
+    pub channels: i32,
+    pub samples: i32,
+    pub data: *mut *mut f32,
 }
 
 /// `IPL_HRTFINTERPOLATION_BILINEAR`: between the measured directions, so a
@@ -84,10 +84,10 @@ const BILINEAR: i32 = 1;
 /// `IPL_SIMDLEVEL_AVX2` (it uses the best the machine has up to this; NEON on the headset).
 const SIMD: i32 = 3;
 
-struct Phonon {
+pub(crate) struct Phonon {
     // (kept loaded for as long as its functions are)
-    _library: libloading::Library,
-    context: Handle,
+    library: libloading::Library,
+    pub(crate) context: Handle,
     effect_create: unsafe extern "C" fn(Handle, *mut AudioSettings, *mut BinauralEffectSettings, *mut Handle) -> i32,
     effect_release: unsafe extern "C" fn(*mut Handle),
     effect_apply: unsafe extern "C" fn(Handle, *mut BinauralEffectParams, *mut AudioBuffer, *mut AudioBuffer) -> i32,
@@ -107,7 +107,13 @@ unsafe impl Send for Phonon {}
 unsafe impl Sync for Phonon {}
 
 impl Phonon {
-    fn call(&self) -> std::sync::MutexGuard<'_, ()> {
+    /// A function of the library by name (`name` ends in a NUL), for the parts of it used elsewhere.
+    pub(crate) fn symbol(&self, name: &[u8]) -> Result<*const c_void, String> {
+        // SAFETY: only looked up here; the caller gives it its type.
+        unsafe { self.library.get::<*const c_void>(name) }.map(|s| *s).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn call(&self) -> std::sync::MutexGuard<'_, ()> {
         self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -145,12 +151,12 @@ impl Phonon {
                 hrtf_create: std::mem::transmute(symbol(b"iplHRTFCreate\0")?),
                 hrtfs: Default::default(),
                 calls: Default::default(),
-                _library: library,
+                library,
             })
         }
     }
 
-    fn hrtf(&self, rate: u32) -> Option<Handle> {
+    pub(crate) fn hrtf(&self, rate: u32) -> Option<Handle> {
         let mut hrtfs = self.hrtfs.lock().ok()?;
         if let Some((_, hrtf)) = hrtfs.iter().find(|(r, _)| *r == rate) {
             return Some(*hrtf as Handle);
@@ -173,7 +179,7 @@ impl Phonon {
     }
 }
 
-fn phonon() -> Option<&'static Phonon> {
+pub(crate) fn phonon() -> Option<&'static Phonon> {
     static PHONON: OnceLock<Option<Phonon>> = OnceLock::new();
     PHONON
         .get_or_init(|| match Phonon::load() {
@@ -231,11 +237,18 @@ pub(crate) struct Voice {
     /// Playback rate (1: as recorded). The HRTF comes after it, so a pitched
     /// loop keeps its direction.
     pitch: AtomicU32,
+    /// How loud the game is playing it (what its sink's volume is set to), which the sound
+    /// itself doesn't otherwise know: the level it is sent to the room's reverb at.
+    level: AtomicU32,
 }
 
 impl Voice {
     pub(crate) fn new(emitter: Arc<Emitter>) -> Arc<Self> {
-        Arc::new(Self { emitter, pitch: AtomicU32::new(1.0f32.to_bits()) })
+        Arc::new(Self { emitter, pitch: AtomicU32::new(1.0f32.to_bits()), level: AtomicU32::new(0.0f32.to_bits()) })
+    }
+
+    pub(crate) fn set_level(&self, level: f32) {
+        self.level.store(level.clamp(0.0, 8.0).to_bits(), Ordering::Relaxed);
     }
 
     pub(crate) fn set_pitch(&self, pitch: f32) {
@@ -304,6 +317,11 @@ pub(crate) struct CleanPlayback {
     ready: VecDeque<f32>,
     /// Frames of silence still to go through the effect after the sound ends (the HRTF's tail).
     tail: u32,
+    /// The room it reverberates in, its place on that room's bus, and (a hit) the level it was
+    /// started at.
+    room: Option<Arc<crate::reverb::Room>>,
+    sent: Option<u64>,
+    started_at: f32,
 }
 
 impl CleanPlayback {
@@ -340,20 +358,30 @@ impl CleanPlayback {
         };
         let mut mono = [0.0f32; FRAME];
         let mut at = self.at;
-        for (i, out) in mono[..count].iter_mut().enumerate() {
+        for out in mono[..count].iter_mut() {
             let (whole, part) = (at.floor(), at.fract() as f32);
             let (a, b) = (self.sample(whole as usize), self.sample(whole as usize + 1));
-            let gain = self.gain + (target - self.gain) * (i as f32 / FRAME as f32);
-            *out = (a + (b - a) * part) * gain;
+            *out = a + (b - a) * part;
             at += pitch;
         }
         if self.looping && !self.samples.is_empty() {
             at %= self.samples.len() as f64;
         }
-        (self.at, self.gain) = (at, target);
         if let Some(filter) = &mut self.filter {
             filter.run(&mut mono[..count]);
         }
+        // To the room, as loud as the game plays it and before distance takes its part (the
+        // room's response has the way from the skater to the head in it).
+        if let (Some(room), Some((_, voice))) = (&self.room, &self.spatial) {
+            let level = if self.looping { load(&voice.level) } else { self.started_at };
+            if room.sounding() {
+                room.send(&mut self.sent, &mono, level);
+            }
+        }
+        for (i, out) in mono[..count].iter_mut().enumerate() {
+            *out *= self.gain + (target - self.gain) * (i as f32 / FRAME as f32);
+        }
+        (self.at, self.gain) = (at, target);
         let Some((effect, voice)) = &self.spatial else {
             self.ready.extend(&mono[..count]);
             return true;
@@ -435,6 +463,9 @@ impl Decodable for CleanPcm {
             looping: self.looping,
             at: 0.0,
             gain: spatial.as_ref().map_or(1.0, |(_, voice)| load(&voice.emitter.gain)),
+            room: spatial.as_ref().and_then(|_| crate::reverb::room().cloned()),
+            sent: None,
+            started_at: spatial.as_ref().map_or(0.0, |(_, voice)| load(&voice.level)),
             spatial,
             ready: VecDeque::with_capacity(2 * FRAME),
             tail: 2,

@@ -10,7 +10,9 @@
 //! listener sits between the eye cameras, so its ear gap is also real metres.
 //!
 //! [`rig`]: super::rig
+use super::planes::{RoomMesh, SceneRevision, SceneShapes, Shape};
 use super::rig::Rig;
+use crate::reverb::{Geometry, RoomFromWorld};
 use crate::skate_audio::clean::SpatialSkateAudio;
 use bevy::audio::{DefaultSpatialScale, SpatialListener, SpatialScale};
 use bevy::prelude::*;
@@ -34,7 +36,7 @@ impl Plugin for SpatialAudioPlugin {
             .add_systems(Startup, |mut commands: Commands| {
                 commands.spawn((HeadListener, SpatialListener::new(EAR_GAP_M), Transform::default()));
             })
-            .add_systems(Update, follow_head);
+            .add_systems(Update, (follow_head, room_surfaces));
     }
 }
 
@@ -45,10 +47,12 @@ fn follow_head(
     eyes: Query<&Transform, (With<XrCamera>, Without<HeadListener>)>,
     mut listener: Query<&mut Transform, With<HeadListener>>,
     mut scale: ResMut<DefaultSpatialScale>,
+    mut room_from_world: ResMut<RoomFromWorld>,
 ) {
     let (Some(root), Ok(mut listener)) = (rig.root_transform(), listener.single_mut()) else {
         return;
     };
+    room_from_world.0 = Some(root.compute_affine().inverse());
     let mut count = 0.0;
     let mut position = Vec3::ZERO;
     let mut rotation = None;
@@ -62,6 +66,10 @@ fn follow_head(
     // tracking space into the game world, scale included, so the ear gap
     // scales with the world like the room does.
     let head = Transform::from_translation(position / count).with_rotation(rotation);
+    // (the room's reverberation is worked out in the room's own space, real metres)
+    if let Some(room) = crate::reverb::room() {
+        room.set_head(head.translation, head.rotation);
+    }
     let target = root.mul_transform(head);
     if *listener != target {
         *listener = target;
@@ -69,5 +77,74 @@ fn follow_head(
     let units = SpatialScale::new(1.0 / (rig.scale * REFERENCE_M));
     if scale.0.0 != units.0 {
         scale.0 = units;
+    }
+}
+
+/// The real room's surfaces to its reverberation, whenever the room scan's entities change: every
+/// Scene plane and box, and the room mesh.
+fn room_surfaces(shapes: Res<SceneShapes>, mesh: Res<RoomMesh>, revision: Res<SceneRevision>, mut given: Local<Option<(u64, usize, bool)>>) {
+    let Some(room) = crate::reverb::room() else { return };
+    let key = (revision.0, shapes.0.len(), mesh.0.is_some());
+    if *given == Some(key) {
+        return;
+    }
+    *given = Some(key);
+    let geometry = room_geometry(&shapes.0, mesh.0.as_ref().map(|m| (m.pose, &*m.vertices, &*m.indices)));
+    info!("ROOM REVERB the room: {} surfaces, {} triangles", shapes.0.len(), geometry.triangles.len());
+    room.set_geometry(Some(std::sync::Arc::new(geometry)));
+}
+
+fn room_geometry(shapes: &[Shape], mesh: Option<(Transform, &[Vec3], &[u32])>) -> Geometry {
+    let mut geometry = Geometry::default();
+    for shape in shapes {
+        match *shape {
+            // (a plane faces along its +Y: corners anticlockwise seen from there)
+            Shape::Plane { pose, half, .. } => {
+                let (u, w) = (pose.rotation * Vec3::X * half.x, pose.rotation * Vec3::Z * half.y);
+                geometry.quad([pose.translation - u - w, pose.translation - u + w, pose.translation + u + w, pose.translation + u - w]);
+            }
+            Shape::Box { pose, half } => {
+                for (axis, a, b) in [(Vec3::X, Vec3::Y, Vec3::Z), (Vec3::Y, Vec3::Z, Vec3::X), (Vec3::Z, Vec3::X, Vec3::Y)] {
+                    for sign in [1.0, -1.0] {
+                        // (each face seen from outside: a, b and the outward normal are right-handed)
+                        let centre = pose.translation + pose.rotation * (axis * half * sign);
+                        let (u, w) = (pose.rotation * (a * half) * sign, pose.rotation * (b * half));
+                        geometry.quad([centre - u - w, centre + u - w, centre + u + w, centre - u + w]);
+                    }
+                }
+            }
+        }
+    }
+    if let Some((pose, vertices, indices)) = mesh {
+        let first = geometry.vertices.len() as u32;
+        geometry.vertices.extend(vertices.iter().map(|&v| pose.transform_point(v)));
+        geometry.triangles.extend(indices.chunks_exact(3).map(|t| [first + t[0], first + t[1], first + t[2]]));
+    }
+    geometry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normal(geometry: &Geometry, triangle: usize) -> Vec3 {
+        let [a, b, c] = geometry.triangles[triangle].map(|i| geometry.vertices[i as usize]);
+        (b - a).cross(c - a).normalize()
+    }
+
+    #[test]
+    fn the_rooms_surfaces_face_the_way_they_are() {
+        let floor = Shape::Plane { pose: Transform::IDENTITY, half: Vec2::new(2.0, 3.0), floor: true };
+        let table = Shape::Box { pose: Transform::from_xyz(1.0, 0.4, 0.0), half: Vec3::new(0.5, 0.4, 0.3) };
+        let vertices = [Vec3::ZERO, Vec3::X, Vec3::Z];
+        let geometry = room_geometry(&[floor, table], Some((Transform::from_xyz(0.0, 2.0, 0.0), &vertices, &[0, 1, 2])));
+        assert_eq!(geometry.triangles.len(), 2 + 12 + 1);
+        assert!(normal(&geometry, 0).distance(Vec3::Y) < 1e-4 && normal(&geometry, 1).distance(Vec3::Y) < 1e-4);
+        // Each of the box's faces looks away from its middle.
+        for triangle in 2..14 {
+            let [a, b, c] = geometry.triangles[triangle].map(|i| geometry.vertices[i as usize]);
+            assert!(normal(&geometry, triangle).dot((a + b + c) / 3.0 - Vec3::new(1.0, 0.4, 0.0)) > 0.0, "face {triangle}");
+        }
+        assert_eq!(geometry.vertices[geometry.triangles[14][1] as usize], Vec3::new(1.0, 2.0, 0.0));
     }
 }

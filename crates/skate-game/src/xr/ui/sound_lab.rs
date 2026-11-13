@@ -101,6 +101,15 @@ impl UiProvider for SoundLabPages {
                 }
                 w.push(Widget::button("reset", "This sound as it came (level, EQ, recording)"));
                 w.push(Widget::info(""));
+                if crate::reverb::room().is_some() {
+                    w.extend([
+                        Widget::slider("reverb", "Room reverb level (every sound)", lab.reverb, (0.0, 4.0, 0.05), format!("{:.2}x", lab.reverb)),
+                        Widget::slider("damping", "Room: how soft its surfaces are", lab.damping, (0.25, 4.0, 0.05), format!("{:.2}x", lab.damping)),
+                    ]);
+                } else {
+                    w.push(Widget::info("No room reverb: Steam Audio isn't loaded."));
+                }
+                w.push(Widget::info(""));
                 w.push(Widget::info(match lab.path() {
                     Some(path) => format!("Saved as you go: {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
                     None => "Not saved: nowhere to keep the tuning here.".to_string(),
@@ -146,6 +155,8 @@ impl UiProvider for SoundLabPages {
             ("solo", _) => lab.solo = !lab.solo,
             ("pitch", Act::Set(v)) => lab.pitch = v,
             ("play", _) => lab.play_once(),
+            ("reverb", Act::Set(v)) => lab.set_reverb(v, lab.damping),
+            ("damping", Act::Set(v)) => lab.set_reverb(lab.reverb, v),
             ("level", Act::Set(v)) => lab.edit(selected, |tune| tune.level_db = v),
             ("synth", _) => lab.edit(selected, |tune| tune.synth = !tune.synth),
             ("reset", _) => lab.edit(selected, |tune| *tune = Default::default()),
