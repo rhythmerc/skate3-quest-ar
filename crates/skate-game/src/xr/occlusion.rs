@@ -5,7 +5,7 @@
 //! really there (`occlusion.wgsl`).
 //!
 //! Off unless the AR settings turn it on (the pass costs GPU time). Edges
-//! fade, over nine depth samples a pixel. Only solid things are hidden: the
+//! are feathered over sixteen depth samples a pixel. Only solid things are hidden: the
 //! menu, the build legend and other see-through draws write no depth and
 //! stay in front of everything.
 //!

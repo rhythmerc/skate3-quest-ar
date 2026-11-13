@@ -48,6 +48,13 @@ fn seen(real: f32, drawn: f32) -> f32 {
     return 1.0 - smoothstep(real * 1.02, real * 1.08 + 0.01, drawn);
 }
 
+// The cubic B-spline's weights for the four texels about a point `f` of
+// the way from the second to the third (they add up to 1).
+fn spline(f: f32) -> vec4<f32> {
+    let g = 1.0 - f;
+    return vec4(g * g * g, 3.0 * f * f * f - 6.0 * f * f + 4.0, 3.0 * g * g * g - 6.0 * g * g + 4.0, f * f * f) / 6.0;
+}
+
 @fragment
 fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let depth = textureLoad(scene_depth, vec2<i32>(position.xy), 0);
@@ -88,17 +95,19 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(room_depth).xy);
     let texel = image * vec2<f32>(size) - 0.5;
     let base = vec2<i32>(floor(texel));
-    // Nine samples about it, the nearer ones counting more: edges fade.
+    // The room's image is far coarser than the picture (a texel is some
+    // seven pixels across): each texel's answer is blended with a cubic
+    // B-spline over the sixteen about the pixel, which has no steps where
+    // the pixel passes from one texel to the next, so edges are feathered
+    // over about two texels, not jagged along them.
+    let f = texel - vec2<f32>(base);
+    let wx = spline(f.x);
+    let wy = spline(f.y);
     var shown = 0.0;
-    var weight = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let centre = vec2<f32>(base + vec2(x, y)) + 0.5;
-            let w = max(0.0, 1.5 - distance(centre, texel + 0.5));
-            shown += w * seen(room_distance(base + vec2(x, y), size), ahead);
-            weight += w;
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            shown += wx[x] * wy[y] * seen(room_distance(base + vec2(x - 1, y - 1), size), ahead);
         }
     }
-    shown /= max(weight, 1e-4);
     return vec4(shown);
 }
