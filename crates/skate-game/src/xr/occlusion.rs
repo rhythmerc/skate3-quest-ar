@@ -138,6 +138,8 @@ struct RoomDepth {
     latest: Option<Latest>,
     eyes: [Option<UniformBuffer<Eye>>; 2],
     logged: bool,
+    /// The pass's pipeline failed (said once).
+    broken: bool,
 }
 
 struct Made {
@@ -396,6 +398,7 @@ fn prepare(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut depth: ResMut<RoomDepth>,
+    problem: Res<OcclusionProblem>,
     views: Query<(Entity, &ExtractedView, &Msaa), With<XrCamera>>,
 ) {
     let (Some(wanted), Some(latest)) = (wanted.filter(|w| w.mode != Occlusion::Off), depth.latest) else { return };
@@ -403,6 +406,14 @@ fn prepare(
         let multisampled = msaa.samples() > 1;
         let format = if view.hdr { ViewTarget::TEXTURE_FORMAT_HDR } else { TextureFormat::bevy_default() };
         let id = pipelines.specialize(&cache, &pipeline, PipelineKey { format, multisampled });
+        // (a pass that can't be made is otherwise only a line in the log)
+        if let bevy::render::render_resource::CachedPipelineState::Err(error) = cache.get_render_pipeline_state(id) {
+            if !depth.broken {
+                depth.broken = true;
+                error!("Occlusion: the pass can't be made: {error}");
+                *problem.0.lock().unwrap() = Some("Occlusion's drawing pass failed to start (see the log).");
+            }
+        }
         commands.entity(entity).insert(OcclusionPipelineId(id, multisampled));
     }
     let tracking_from_world = wanted.world_from_tracking.inverse();
@@ -485,5 +496,34 @@ mod tests {
         assert_eq!(Occlusion::default(), Occlusion::Off);
         let s: Occlusion = serde_json::from_str("\"Soft\"").unwrap();
         assert_eq!((s, s.name()), (Occlusion::Soft, "soft"));
+    }
+
+    /// The pass's shader is valid WGSL, with and without MSAA. (A shader
+    /// that isn't only shows as a log line on the headset, and no occlusion.)
+    #[test]
+    fn the_shader_is_valid() {
+        let source = include_str!("occlusion.wgsl");
+        for multisampled in [false, true] {
+            // What Bevy's preprocessor would do: the import, and the #ifdef.
+            let mut text = String::from("struct View { world_from_clip: mat4x4<f32>, viewport: vec4<f32> }\n");
+            let mut keep = true;
+            for line in source.lines() {
+                match line.trim() {
+                    l if l.starts_with("#import") => {}
+                    "#ifdef MULTISAMPLED" => keep = multisampled,
+                    "#else" => keep = !multisampled,
+                    "#endif" => keep = true,
+                    _ if keep => {
+                        text.push_str(line);
+                        text.push('\n');
+                    }
+                    _ => {}
+                }
+            }
+            let module = wgpu::naga::front::wgsl::parse_str(&text).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+            wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        }
     }
 }

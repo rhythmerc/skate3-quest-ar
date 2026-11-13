@@ -38,14 +38,14 @@ fn room_distance(texel: vec2<i32>, size: vec2<i32>) -> f32 {
 }
 
 // 1: seen; 0: behind the real surface. A little past it still counts as on it.
-fn seen(real: f32, virtual: f32, soft: bool) -> f32 {
+fn seen(real: f32, drawn: f32, soft: bool) -> f32 {
     if real <= 0.0 {
         return 1.0;
     }
     if soft {
-        return 1.0 - smoothstep(real * 1.02, real * 1.08 + 0.01, virtual);
+        return 1.0 - smoothstep(real * 1.02, real * 1.08 + 0.01, drawn);
     }
-    return select(1.0, 0.0, virtual > real * 1.04 + 0.01);
+    return select(1.0, 0.0, drawn > real * 1.04 + 0.01);
 }
 
 @fragment
