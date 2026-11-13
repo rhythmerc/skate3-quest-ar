@@ -157,6 +157,13 @@ impl Placed {
         snap::Footprint { position: Vec3::from_array(self.position), yaw: self.yaw, min: min * k, max: max * k }
     }
 
+    /// Where other pieces join it, in tracking space ([`snap::meet`]).
+    fn edges(&self, metres: f32) -> Vec<snap::Edge> {
+        let k = metres * self.scale;
+        let (at, turn) = (Vec3::from_array(self.position), Quat::from_rotation_y(self.yaw));
+        self.piece.joins().iter().map(|j| snap::Edge { at: at + turn * (j.at * k), out: turn * j.out, width: j.width * k }).collect()
+    }
+
     pub(crate) fn name(&self) -> String {
         format!("{:?} {}", self.piece.kind, self.id)
     }
@@ -295,6 +302,13 @@ struct BuildState {
     /// Free placement: pieces go where the right hand holds them, not on
     /// the surface it points at.
     free: bool,
+    /// The piece in hand is joined to another's edge: how far that leaves
+    /// its base above the surface (`Piece::lift`), and the edge (its middle,
+    /// the direction along it and its length, tracking space).
+    lift: f32,
+    join: Option<(Vec3, Vec3, f32)>,
+    /// The player has set the next piece's dimensions: a join leaves them.
+    own_dimensions: bool,
     menu_hold: Option<f32>,
     toggled: bool,
     clear_hold: f32,
@@ -332,6 +346,9 @@ impl Default for BuildState {
             ray: None,
             ghost: None,
             free: false,
+            lift: 0.0,
+            join: None,
+            own_dimensions: false,
             menu_hold: None,
             toggled: false,
             clear_hold: 0.0,
@@ -374,6 +391,7 @@ impl BuildState {
             kind: PieceKind::ALL[self.selected],
             size: snap_size(self.sizes[self.selected]),
             width: snap_size(self.widths[self.selected]),
+            lift: self.lift,
         }
     }
 }
@@ -517,6 +535,7 @@ fn build_controls(
     if now.left_flick != 0 && now.left_flick != previous.left_flick {
         let n = PieceKind::ALL.len() as i32;
         state.selected = (state.selected as i32 + now.left_flick as i32).rem_euclid(n) as usize;
+        state.own_dimensions = false;
         finish_edit(&mut placed);
         placed.selected = None;
         info!("BUILD selected {:?}", PieceKind::ALL[state.selected]);
@@ -642,7 +661,12 @@ fn build_controls(
                 if let Some(item) = placed.get_mut(id) {
                     match edit {
                         Edit::Turn => item.yaw += turn,
-                        Edit::Scale => item.scale = snap_scale(value),
+                        Edit::Scale => {
+                            // (its base stays on the surface it reaches down to)
+                            let scale = snap_scale(value);
+                            item.piece.lift *= item.scale / scale;
+                            item.scale = scale;
+                        }
                         Edit::Stretch => item.piece.size = snap_size(value),
                         Edit::Widen => item.piece.width = snap_size(value),
                         Edit::Tint if steps != (0, 0) => {
@@ -678,9 +702,13 @@ fn build_controls(
                 // (a piece being moved keeps its shape: only its turn follows the stick)
                 _ if placed.dragging.is_some() => {}
                 Some(Edit::Scale) => state.scale = (state.scale * factor).clamp(MIN_PIECE_SCALE, MAX_PIECE_SCALE),
-                Some(Edit::Stretch) => state.sizes[selected] = (state.sizes[selected] * factor).clamp(MIN_SIZE, MAX_SIZE),
+                Some(Edit::Stretch) => {
+                    state.sizes[selected] = (state.sizes[selected] * factor).clamp(MIN_SIZE, MAX_SIZE);
+                    state.own_dimensions = true;
+                }
                 Some(Edit::Widen) if kind.width_axis().is_some() => {
                     state.widths[selected] = (state.widths[selected] * factor).clamp(MIN_SIZE, MAX_SIZE);
+                    state.own_dimensions = true;
                 }
                 Some(Edit::Tint) if steps != (0, 0) => {
                     state.tints[selected] = Some(state.tints[selected].unwrap_or(Tint::of(state.finish())).stepped(steps.0, steps.1));
@@ -709,8 +737,11 @@ fn build_controls(
         ),
         None => state.yaw,
     };
-    // Beside another piece of its kind, it sits flush against it.
-    if let Some((position, _)) = state.ghost {
+    // Beside another piece of its kind, it sits flush against it; at an edge
+    // of any other, edge to edge at that edge's height.
+    state.lift = 0.0;
+    state.join = None;
+    if let Some((position, _)) = state.ghost.filter(|_| !state.free) {
         let metres = placed.park_scale / root.scale.x;
         let moving = match placed.dragging {
             Some(id) => placed.items.iter().find(|p| p.id == id).cloned(),
@@ -726,6 +757,7 @@ fn build_controls(
             }),
         };
         if let Some(mut moving) = moving {
+            moving.piece.lift = 0.0;
             moving.position = position.to_array();
             moving.yaw = state.placed_yaw;
             let neighbours: Vec<_> = placed
@@ -737,10 +769,62 @@ fn build_controls(
             if let Some((place, yaw)) = snap::join(neighbours.iter().copied(), moving.footprint(metres)) {
                 state.ghost = Some((place, root.transform_point(place)));
                 state.placed_yaw = yaw;
-            } else if moving.piece.kind == PieceKind::Rail {
+            } else if let Some(place) =
+                Some(()).filter(|_| moving.piece.kind == PieceKind::Rail).and_then(|_| snap::join_ends(neighbours, moving.footprint(metres)))
+            {
                 // Rails also meet end to end at any angle.
-                if let Some(place) = snap::join_ends(neighbours, moving.footprint(metres)) {
-                    state.ghost = Some((place, root.transform_point(place)));
+                state.ghost = Some((place, root.transform_point(place)));
+            } else {
+                let theirs: Vec<snap::Edge> = placed
+                    .items
+                    .iter()
+                    .filter(|p| Some(p.id) != placed.dragging)
+                    .flat_map(|p| p.edges(metres))
+                    .collect();
+                let reach = snap::JOIN_REACH * {
+                    let f = moving.footprint(metres);
+                    (f.max - f.min).max_element()
+                };
+                let k = metres * moving.scale;
+                let own = |piece: Piece| -> Vec<snap::Edge> {
+                    piece.joins().iter().map(|j| snap::Edge { at: j.at * k, out: j.out, width: j.width * k }).collect()
+                };
+                let mut met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach);
+                // The next piece takes the width of the edge it joins, unless the player set its own.
+                if let (Some(found), None, false) = (met, placed.dragging, state.own_dimensions) {
+                    if let Some((dimension, per)) = moving.piece.joins()[found.own].follows {
+                        let fitted = found.edge.width / (per * k);
+                        if (MIN_SIZE..=MAX_SIZE).contains(&fitted) {
+                            let fitted = snap_size(fitted);
+                            let selected = state.selected;
+                            match dimension {
+                                pieces::Dimension::Size => {
+                                    state.sizes[selected] = fitted;
+                                    moving.piece.size = fitted;
+                                }
+                                pieces::Dimension::Width => {
+                                    state.widths[selected] = fitted;
+                                    moving.piece.width = fitted;
+                                }
+                            }
+                            met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach).or(met);
+                        }
+                    }
+                }
+                // How far above (or into) what is under it that leaves its base.
+                let joined = met.and_then(|met| {
+                    let above = root.transform_point(met.place.with_y(met.edge.at.y - 0.01));
+                    let under = cast(&world, &placed, &root, above, root.rotation * Vec3::NEG_Y)?;
+                    let lift = (met.place.y - to_tracking.transform_point3(under.point).y) / k;
+                    let lift = if lift.abs() < 0.02 { 0.0 } else { lift };
+                    (lift >= moving.piece.least_lift()).then_some((met, lift))
+                });
+                if let Some((met, lift)) = joined {
+                    state.ghost = Some((met.place, root.transform_point(met.place)));
+                    state.placed_yaw = met.yaw;
+                    state.lift = lift;
+                    let along = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * met.edge.out;
+                    state.join = Some((met.edge.at, along, met.edge.width));
                 }
             }
         }
@@ -774,6 +858,7 @@ fn build_controls(
         if let (Some((position, _)), Some(item)) = (state.ghost, placed.items.iter_mut().find(|p| p.id == id)) {
             item.position = position.to_array();
             item.yaw = state.placed_yaw;
+            item.piece.lift = state.lift;
         }
         if !now.grip {
             placed.dragging = None;
@@ -787,6 +872,20 @@ fn build_controls(
     }
     let confirm = !more && (pressed(now.trigger, previous.trigger) || pressed(now.a, previous.a));
     let click = !more && pressed(now.click, previous.click);
+    // B removes the piece the pointer is on, selected or not; pointing at
+    // none, the selected one.
+    if pressed(now.b, previous.b) {
+        if let Some(id) = placed.pointed.or(placed.selected) {
+            if let Some(removed) = placed.remove(id) {
+                info!("BUILD deleted {:?} (piece {})", removed.piece.kind, removed.id);
+            }
+            if placed.selected == Some(id) {
+                placed.selected = None;
+            }
+            placed.pointed = None;
+        }
+        return;
+    }
     if let Some(id) = placed.selected {
         // Editing.
         if more && pressed(now.a, previous.a) {
@@ -796,11 +895,6 @@ fn build_controls(
                 info!("BUILD piece {id} hidden={}", item.hidden);
             }
             placed.revision += 1;
-        } else if pressed(now.b, previous.b) {
-            if let Some(removed) = placed.remove(id) {
-                info!("BUILD deleted {:?} (piece {})", removed.piece.kind, removed.id);
-            }
-            placed.selected = None;
         } else if click {
             // A copy: the next piece to drop is this one over again.
             if let Some(item) = placed.items.iter().find(|p| p.id == id).cloned() {
@@ -871,6 +965,7 @@ fn describe(
             None => (chosen, state.finish(), state.tint().is_some(), "its"),
         };
         let lower = |k: PieceKind| k.name().to_lowercase();
+        let pointed = placed.pointed.and_then(|id| placed.items.iter().find(|p| p.id == id));
         if placed.dragging.is_some() {
             next.right = vec![Row::new("Stick ↔", "turn it"), Row::new("Grip", "let go to put it down")];
         } else if touch.0.left_grip > PRESS {
@@ -899,7 +994,10 @@ fn describe(
                 Row::new("Stick ↕", "make it bigger / smaller"),
                 Row::new("Grip (hold)", "move it"),
                 Row::new("Stick click", "copy it"),
-                Row::new("B", "delete it"),
+                Row::new("B", match pointed.filter(|p| p.id != item.id) {
+                    Some(other) => format!("remove that {}", lower(other.piece.kind)),
+                    None => "remove it".to_string(),
+                }),
                 Row::new("A / Trigger", "done"),
             ];
         } else {
@@ -919,13 +1017,15 @@ fn describe(
                     "A / Trigger",
                     match (state.free, state.ghost.is_some()) {
                         (true, _) => "put it here",
+                        (false, true) if state.join.is_some() => "join it on there",
                         (false, true) => "put it there",
                         (false, false) => "point at a surface",
                     },
                 ),
             ];
-            if let Some(item) = placed.pointed.and_then(|id| placed.items.iter().find(|p| p.id == id)) {
+            if let Some(item) = pointed {
                 next.right.push(Row::new("Grip", format!("select this {}", lower(item.piece.kind))));
+                next.right.push(Row::new("B", format!("remove this {}", lower(item.piece.kind))));
             }
             next.right.push(Row::new("Stick click", if state.free { "back onto surfaces" } else { "hold it in the hand" }));
             next.right.push(Row::new("Y", "scan the room again"));
@@ -1068,7 +1168,7 @@ fn cast(
 /// and the palette.
 #[derive(Resource, Default)]
 struct PieceAssets {
-    meshes: HashMap<(PieceKind, u32, u32), Handle<Mesh>>,
+    meshes: HashMap<(PieceKind, u32, u32, u32), Handle<Mesh>>,
     solid: HashMap<(PieceKind, Finish, Option<Tint>), Handle<StandardMaterial>>,
     /// A finish's photograph, and (true) that photograph without its own
     /// colour, to be given another.
@@ -1084,7 +1184,7 @@ struct PieceAssets {
 impl PieceAssets {
     fn mesh(&mut self, piece: Piece, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         self.meshes
-            .entry((piece.kind, piece.size.to_bits(), piece.width.to_bits()))
+            .entry((piece.kind, piece.size.to_bits(), piece.width.to_bits(), piece.lift.to_bits()))
             .or_insert_with(|| meshes.add(piece_mesh(&piece.geometry())))
             .clone()
     }
@@ -1308,6 +1408,8 @@ enum Mark {
     /// A stretch arrow (0: its size, 1: its width): its shaft and two heads.
     Shaft(usize),
     Head(usize, f32),
+    /// A bar along the edge the piece in hand is joined to.
+    Join,
 }
 #[derive(Component)]
 struct BuildRay;
@@ -1375,6 +1477,13 @@ fn spawn_visuals(
             commands.spawn((EditMark(Mark::Head(axis, end), None), Mesh3d(head.clone()), MeshMaterial3d(arrow.clone()), Transform::default(), Visibility::Hidden));
         }
     }
+    commands.spawn((
+        EditMark(Mark::Join, None),
+        Mesh3d(shaft.clone()),
+        MeshMaterial3d(materials.add(unlit(Color::srgb(0.3, 1.0, 0.9)))),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
     commands.spawn((
         BuildRay,
         Mesh3d(meshes.add(Cylinder::new(0.04, 1.0))),
@@ -1639,6 +1748,11 @@ fn show_edit(
                     Transform { translation: at.transform_point(middle - middle * 1.04), scale: at.scale * 1.04, ..at }
                 })
             }
+            (Mark::Join, Some(root)) => state.join.filter(|_| placed.selected.is_none() || placed.dragging.is_some()).map(|(at, along, width)| Transform {
+                translation: root.transform_point(at),
+                rotation: root.rotation * Quat::from_rotation_arc(Vec3::X, along),
+                scale: root.scale.x * Vec3::new(width.max(0.06), 0.012, 0.012),
+            }),
             (Mark::Shaft(axis) | Mark::Head(axis, _), _) => stretched.and_then(|(piece, at)| {
                 let along = if axis == 0 { Some(piece.kind.size_axis()) } else { piece.kind.width_axis() }?;
                 let (lo, hi) = piece.geometry().bounds();

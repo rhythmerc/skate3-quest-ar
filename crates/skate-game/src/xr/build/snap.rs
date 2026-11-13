@@ -15,7 +15,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 pub(crate) const JOIN_ANGLE: f32 = 25.0 * PI / 180.0;
 /// How near its place beside a neighbour a piece must be to take it, as a
 /// share of the piece's longest side.
-const JOIN_REACH: f32 = 0.25;
+pub(crate) const JOIN_REACH: f32 = 0.25;
 /// Pieces join only on the same surface: their bases this near in height, m.
 const JOIN_HEIGHT_M: f32 = 0.05;
 
@@ -141,9 +141,108 @@ pub(crate) fn join_ends(neighbours: impl IntoIterator<Item = Footprint>, own: Fo
     best.map(|(_, place)| place)
 }
 
+/// A join of a piece (`pieces::Join`), in real metres: of a placed piece in
+/// tracking space, or of the piece in hand in its own frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Edge {
+    pub at: Vec3,
+    /// Unit, level, out of the piece.
+    pub out: Vec3,
+    /// 0: a rail's end.
+    pub width: f32,
+}
+
+/// Where the piece in hand goes to join a placed one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Met {
+    /// Its place (its base's middle, at the height that brings the edges level) and turn.
+    pub place: Vec3,
+    pub yaw: f32,
+    /// Which of its joins (an index into `own`), and the edge it meets.
+    pub own: usize,
+    pub edge: Edge,
+}
+
+/// The turn about +Y that takes +Z to a level direction.
+fn turn_of(direction: Vec3) -> f32 {
+    direction.x.atan2(direction.z)
+}
+
+/// Edge to edge, between any kinds: the piece at `position` turned `yaw`,
+/// whose joins in its own frame are `own`, takes the place that puts one of
+/// them on one of `theirs`, facing it and at its height, when it is within
+/// `reach` of there (over the ground: the piece comes up or down to it) and
+/// turned within [`JOIN_ANGLE`] of facing it. Rails' ends meet each other
+/// only, at any angle. The nearest wins.
+pub(crate) fn meet(theirs: impl IntoIterator<Item = Edge>, position: Vec3, yaw: f32, own: &[Edge], reach: f32) -> Option<Met> {
+    let mut best: Option<(f32, Met)> = None;
+    for edge in theirs {
+        for (index, mine) in own.iter().enumerate() {
+            if (edge.width == 0.0) != (mine.width == 0.0) {
+                continue;
+            }
+            let turned = if mine.width == 0.0 {
+                yaw
+            } else {
+                let facing = turn_of(-edge.out) - turn_of(mine.out);
+                if angle_between(facing, yaw).abs() > JOIN_ANGLE {
+                    continue;
+                }
+                yaw + angle_between(facing, yaw)
+            };
+            let now = position + Quat::from_rotation_y(yaw) * mine.at;
+            let distance = now.xz().distance(edge.at.xz());
+            if distance <= reach && best.is_none_or(|(d, _)| distance < d) {
+                let place = edge.at - Quat::from_rotation_y(turned) * mine.at;
+                best = Some((distance, Met { place, yaw: turned, own: index, edge }));
+            }
+        }
+    }
+    best.map(|(_, met)| met)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_platform_meets_the_top_of_a_ramp() {
+        // A ramp's top edge 0.8 up, facing -z; a platform (4 x 1.2 x 4) brought behind it on the floor.
+        let top = Edge { at: Vec3::new(1.0, 0.8, -2.0), out: Vec3::NEG_Z, width: 2.0 };
+        let platform = [
+            Edge { at: Vec3::new(0.0, 1.2, -2.0), out: Vec3::NEG_Z, width: 4.0 },
+            Edge { at: Vec3::new(0.0, 1.2, 2.0), out: Vec3::Z, width: 4.0 },
+            Edge { at: Vec3::new(-2.0, 1.2, 0.0), out: Vec3::NEG_X, width: 4.0 },
+            Edge { at: Vec3::new(2.0, 1.2, 0.0), out: Vec3::X, width: 4.0 },
+        ];
+        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), 0.15, &platform, 1.0).expect("near enough");
+        // Its +z edge on the ramp's top: its middle 2 m behind, its top level with the ramp's.
+        assert!(met.place.distance(Vec3::new(1.0, 0.8 - 1.2, -4.0)) < 1e-4, "{met:?}");
+        assert!(angle_between(met.yaw, 0.0).abs() < 1e-4 && met.own == 1);
+        // Turned a quarter, another of its edges takes it.
+        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), FRAC_PI_2 + 0.1, &platform, 1.0).expect("near enough");
+        assert!(angle_between(met.yaw, FRAC_PI_2).abs() < 1e-4 && met.own == 2, "{met:?}");
+        assert!(met.place.distance(Vec3::new(1.0, -0.4, -4.0)) < 1e-4);
+        // Too far, or turned 45 degrees: left alone.
+        assert!(meet([top], Vec3::new(1.0, 0.0, -6.0), 0.0, &platform, 1.0).is_none());
+        assert!(meet([top], Vec3::new(1.2, 0.0, -4.3), 0.8, &platform, 1.0).is_none());
+    }
+
+    #[test]
+    fn rail_ends_meet_each_other_at_any_height_and_turn() {
+        let end = Edge { at: Vec3::new(0.0, 1.3, 0.0), out: Vec3::X, width: 0.0 };
+        let rail = [
+            Edge { at: Vec3::new(-1.5, 0.5, 0.0), out: Vec3::NEG_X, width: 0.0 },
+            Edge { at: Vec3::new(1.5, 0.5, 0.0), out: Vec3::X, width: 0.0 },
+        ];
+        let yaw = 0.9;
+        let start = Quat::from_rotation_y(yaw) * rail[0].at;
+        let met = meet([end], Vec3::new(0.1, 0.0, 0.05) - start.with_y(0.0), yaw, &rail, 0.5).expect("near enough");
+        assert!((met.place + start).distance(end.at) < 1e-4 && met.yaw == yaw, "{met:?}");
+        // A rail's end doesn't take a ramp's edge.
+        let top = Edge { at: Vec3::ZERO, out: Vec3::X, width: 2.0 };
+        assert!(meet([top], -start, yaw, &rail, 0.5).is_none());
+    }
 
     fn table(yaw: f32) -> SurfaceBox {
         (Quat::from_rotation_y(yaw), Vec3::new(1.0, 0.375, -1.0), Vec3::new(0.6, 0.375, 0.4))

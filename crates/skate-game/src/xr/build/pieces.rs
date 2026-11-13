@@ -176,6 +176,37 @@ pub(crate) struct Piece {
     /// from before it.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub width: f32,
+    /// How far its base is above the surface it stands on (its own metres),
+    /// when it was joined to another piece higher up: it then stands on a
+    /// solid base down to that surface (a rail on longer posts). Below 0 for
+    /// a box joined lower than its own height: it is that much shorter.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lift: f32,
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// Where another piece can be joined to a piece: a level edge of it, in its
+/// own metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Join {
+    /// The edge's middle.
+    pub at: Vec3,
+    /// Level, out of the piece across the edge.
+    pub out: Vec3,
+    /// The edge's length (0: a rail's end, which joins at any angle).
+    pub width: f32,
+    /// Which of the piece's dimensions the edge's length follows, and that
+    /// length at 1.
+    pub follows: Option<(Dimension, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dimension {
+    Size,
+    Width,
 }
 
 fn one() -> f32 {
@@ -313,16 +344,17 @@ impl PieceGeometry {
 
 impl Piece {
     pub(crate) fn new(kind: PieceKind) -> Self {
-        Self { kind, size: 1.0, width: 1.0 }
+        Self { kind, size: 1.0, width: 1.0, lift: 0.0 }
     }
 
     pub(crate) fn sized(kind: PieceKind, size: f32) -> Self {
-        Self { kind, size, width: 1.0 }
+        Self { kind, size, width: 1.0, lift: 0.0 }
     }
 
     pub(crate) fn geometry(&self) -> PieceGeometry {
         let s = self.size.clamp(MIN_SIZE, MAX_SIZE);
         let w = self.width.clamp(MIN_SIZE, MAX_SIZE);
+        let lift = self.lift;
         let mut g = PieceGeometry::default();
         match self.kind {
             PieceKind::Kicker => {
@@ -363,14 +395,20 @@ impl Piece {
                 box_quads(&mut tube_faces, Vec3::new(-x, top - tube, -tube * 0.5), Vec3::new(x, top, tube * 0.5));
                 g.rail_quads = tube_faces;
                 for px in [-x + 0.6, x - 0.6] {
-                    box_quads(&mut g.quads, Vec3::new(px - 0.04, 0.0, -0.04), Vec3::new(px + 0.04, top - tube, 0.04));
+                    box_quads(&mut g.quads, Vec3::new(px - 0.04, -lift.max(0.0), -0.04), Vec3::new(px + 0.04, top - tube, 0.04));
                 }
                 g.rails.push(vec![Vec3::new(-x, top, 0.0), Vec3::new(x, top, 0.0)]);
             }
-            PieceKind::Ledge => grind_box(&mut g, Vec3::new(5.0 * s, 0.5, 0.8 * w), [true, false, true, false]),
-            PieceKind::FunBox => grind_box(&mut g, Vec3::new(3.0 * s, 0.5, 2.0 * w), [true; 4]),
-            PieceKind::Platform => grind_box(&mut g, Vec3::new(4.0 * s, 1.2, 4.0 * w), [true; 4]),
-            PieceKind::Wall => grind_box(&mut g, Vec3::new(6.0 * s, 2.6, 0.4), [false; 4]),
+            PieceKind::Ledge | PieceKind::FunBox | PieceKind::Platform | PieceKind::Wall => {
+                let size = self.box_size().expect("a box");
+                let grind = match self.kind {
+                    PieceKind::Ledge => [true, false, true, false],
+                    PieceKind::Wall => [false; 4],
+                    _ => [true; 4],
+                };
+                // (its base goes down to the surface, or starts above its own)
+                grind_box(&mut g, size, (-lift).min(size.y - MIN_BOX_M), grind);
+            }
             PieceKind::Bank => {
                 // A flat slope up to a short deck, run in from +z like a kicker.
                 let (length, height, deck, width) = (4.0 * s, 1.0 * s, 1.0, 3.0 * w);
@@ -413,7 +451,7 @@ impl Piece {
                     level_tube_quads(&mut g.rail_quads, pair[0], pair[1], tube);
                 }
                 for p in [points[1], points[segments / 2], points[segments - 1]] {
-                    box_quads(&mut g.quads, Vec3::new(p.x - 0.04, 0.0, p.z - 0.04), Vec3::new(p.x + 0.04, top - tube, p.z + 0.04));
+                    box_quads(&mut g.quads, Vec3::new(p.x - 0.04, -lift.max(0.0), p.z - 0.04), Vec3::new(p.x + 0.04, top - tube, p.z + 0.04));
                 }
                 g.rails.push(points);
             }
@@ -427,7 +465,110 @@ impl Piece {
                 coping(&mut g, 0.0, radius, width);
             }
         }
+        // A ramp joined higher up stands on a solid block down to the surface.
+        if lift > 0.0 && self.box_size().is_none() && !self.kind.on_posts() && !self.kind.sunk() {
+            let (lo, hi) = g.footprint();
+            let mut block = Vec::new();
+            box_quads(&mut block, Vec3::new(lo.x, -lift, lo.y), Vec3::new(hi.x, 0.0, hi.y));
+            // (not its top: that is inside the piece)
+            g.quads.extend(block.into_iter().filter(|q| quad_normal(q).normalize().y < 0.9));
+        }
         g
+    }
+
+    /// A box kind's size at this piece's dimensions (x, its full height, z).
+    fn box_size(&self) -> Option<Vec3> {
+        let s = self.size.clamp(MIN_SIZE, MAX_SIZE);
+        let w = self.width.clamp(MIN_SIZE, MAX_SIZE);
+        match self.kind {
+            PieceKind::Ledge => Some(Vec3::new(5.0 * s, 0.5, 0.8 * w)),
+            PieceKind::FunBox => Some(Vec3::new(3.0 * s, 0.5, 2.0 * w)),
+            PieceKind::Platform => Some(Vec3::new(4.0 * s, 1.2, 4.0 * w)),
+            PieceKind::Wall => Some(Vec3::new(6.0 * s, 2.6, 0.4)),
+            _ => None,
+        }
+    }
+
+    /// The least `lift` the piece can have: a box can be shorter than its
+    /// own height (down to [`MIN_BOX_M`]), nothing else can go into a surface.
+    pub(crate) fn least_lift(&self) -> f32 {
+        self.box_size().map_or(0.0, |size| MIN_BOX_M - size.y)
+    }
+
+    /// Where other pieces join this one (`lift` aside: from its own base).
+    pub(crate) fn joins(&self) -> Vec<Join> {
+        use Dimension::*;
+        let s = self.size.clamp(MIN_SIZE, MAX_SIZE);
+        let w = self.width.clamp(MIN_SIZE, MAX_SIZE);
+        // An edge across x at (y, z), facing along z.
+        let across = |y: f32, z: f32, facing: f32, width: f32, per: f32| Join {
+            at: Vec3::new(0.0, y, z),
+            out: Vec3::Z * facing,
+            width,
+            follows: (per > 0.0).then_some((Width, per)),
+        };
+        if let Some(size) = self.box_size() {
+            let h = size * 0.5;
+            let (per_x, per_z) = (size.x / s, size.z / w);
+            let wide = self.kind.width_axis().is_some();
+            return vec![
+                Join { at: Vec3::new(0.0, size.y, -h.z), out: Vec3::NEG_Z, width: size.x, follows: Some((Size, per_x)) },
+                Join { at: Vec3::new(0.0, size.y, h.z), out: Vec3::Z, width: size.x, follows: Some((Size, per_x)) },
+                Join { at: Vec3::new(-h.x, size.y, 0.0), out: Vec3::NEG_X, width: size.z, follows: wide.then_some((Width, per_z)) },
+                Join { at: Vec3::new(h.x, size.y, 0.0), out: Vec3::X, width: size.z, follows: wide.then_some((Width, per_z)) },
+            ];
+        }
+        match self.kind {
+            PieceKind::Kicker => {
+                let (length, height) = (2.5 * s, 0.8 * s);
+                vec![across(height, -length * 0.5, -1.0, 2.0 * w, 2.0), across(0.0, length * 0.5, 1.0, 2.0 * w, 2.0)]
+            }
+            PieceKind::Bank => {
+                let (length, height) = (4.0 * s, 1.0 * s);
+                vec![across(height, -length * 0.5, -1.0, 3.0 * w, 3.0), across(0.0, length * 0.5, 1.0, 3.0 * w, 3.0)]
+            }
+            PieceKind::QuarterPipe => {
+                let (radius, deck) = (2.0 * s, 1.0);
+                let z0 = -(radius + deck) * 0.5;
+                vec![across(radius, z0, -1.0, 4.0 * w, 4.0), across(0.0, -z0, 1.0, 4.0 * w, 4.0)]
+            }
+            PieceKind::HalfPipe => {
+                let (radius, deck, flat) = (2.0 * s, 1.0, 3.0 * w);
+                let half = deck + radius + flat * 0.5;
+                vec![across(radius, -half, -1.0, 5.0, 0.0), across(radius, half, 1.0, 5.0, 0.0)]
+            }
+            PieceKind::Stairs => {
+                let (steps, rise, run, deck) = (5.0, 0.17 * s, 0.35 * s, 1.5);
+                let z0 = -(deck + run * steps) * 0.5;
+                vec![across(rise * steps, z0, -1.0, 3.0 * w, 3.0), across(0.0, -z0, 1.0, 3.0 * w, 3.0)]
+            }
+            PieceKind::Spine => {
+                let radius = 1.6 * s;
+                vec![across(0.0, -radius, -1.0, 4.0 * w, 4.0), across(0.0, radius, 1.0, 4.0 * w, 4.0)]
+            }
+            PieceKind::Rail => {
+                let x = 3.0 * s;
+                [-1.0, 1.0].map(|end| Join { at: Vec3::new(end * x, 0.5, 0.0), out: Vec3::X * end, width: 0.0, follows: None }).to_vec()
+            }
+            PieceKind::CurvedRail => {
+                let radius = 3.0 * s;
+                vec![
+                    Join { at: Vec3::new(radius * 0.5, 0.5, -radius * 0.5), out: Vec3::NEG_Z, width: 0.0, follows: None },
+                    Join { at: Vec3::new(-radius * 0.5, 0.5, radius * 0.5), out: Vec3::NEG_X, width: 0.0, follows: None },
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The least height of a box joined lower than its own, m.
+const MIN_BOX_M: f32 = 0.1;
+
+impl PieceKind {
+    /// Stands on posts, which reach down when it is joined higher up.
+    pub(crate) fn on_posts(self) -> bool {
+        matches!(self, Self::Rail | Self::CurvedRail)
     }
 }
 
@@ -450,9 +591,9 @@ fn coping(g: &mut PieceGeometry, z: f32, height: f32, width: f32) {
 }
 
 /// A box whose top edges (in order -z, +x, +z, -x) are optionally grindable.
-fn grind_box(g: &mut PieceGeometry, size: Vec3, grind: [bool; 4]) {
+fn grind_box(g: &mut PieceGeometry, size: Vec3, base: f32, grind: [bool; 4]) {
     let h = size * 0.5;
-    box_quads(&mut g.quads, Vec3::new(-h.x, 0.0, -h.z), Vec3::new(h.x, size.y, h.z));
+    box_quads(&mut g.quads, Vec3::new(-h.x, base, -h.z), Vec3::new(h.x, size.y, h.z));
     let c = [
         Vec3::new(-h.x, size.y, -h.z),
         Vec3::new(h.x, size.y, -h.z),
@@ -687,6 +828,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_lifted_piece_reaches_down_to_the_surface_and_keeps_its_top() {
+        for kind in PieceKind::ALL {
+            let piece = Piece { lift: 0.7, ..Piece::new(kind) };
+            let (plain, lifted) = (Piece::new(kind).geometry(), piece.geometry());
+            let ((lo, hi), (plain_lo, plain_hi)) = (lifted.bounds(), plain.bounds());
+            assert!((hi.y - plain_hi.y).abs() < 1e-5, "{kind:?} keeps its top");
+            if kind.sunk() {
+                assert_eq!(lo, plain_lo, "{kind:?} is in its surface");
+                continue;
+            }
+            assert!((lo.y + 0.7).abs() < 1e-5, "{kind:?} reaches down: {lo}");
+            // A base is under the piece, not round it; a rail's is only its posts.
+            assert_eq!(lifted.footprint(), plain.footprint(), "{kind:?}");
+            assert_eq!(lifted.rail_quads.len(), plain.rail_quads.len());
+            // Its joins are where they were: lift moves the piece, not its edges.
+            assert_eq!(piece.joins(), Piece::new(kind).joins());
+        }
+        // A box joined lower than its own height is that much shorter, never gone.
+        let low = Piece { lift: -0.8, ..Piece::new(PieceKind::Platform) }.geometry().bounds();
+        assert!((low.0.y - 0.8).abs() < 1e-5 && (low.1.y - 1.2).abs() < 1e-5, "{low:?}");
+        let flat = Piece { lift: -5.0, ..Piece::new(PieceKind::Platform) }.geometry().bounds();
+        assert!(flat.1.y - flat.0.y > 0.05, "{flat:?}");
+        assert!(Piece::new(PieceKind::Kicker).least_lift() == 0.0 && Piece::new(PieceKind::Platform).least_lift() < -1.0);
+    }
+
+    #[test]
+    fn joins_are_level_edges_of_the_piece() {
+        for kind in PieceKind::ALL {
+            for (size, width) in [(1.0, 1.0), (0.5, 2.0), (2.5, 0.5)] {
+                let piece = Piece { width, ..Piece::sized(kind, size) };
+                let (lo, hi) = piece.geometry().bounds();
+                for j in piece.joins() {
+                    assert!((j.out.length() - 1.0).abs() < 1e-5 && j.out.y == 0.0, "{kind:?}");
+                    // On the piece's outline, at a height it has, facing out of it.
+                    assert!(j.at.cmpge(lo - 1e-3).all() && j.at.cmple(hi + 1e-3).all(), "{kind:?} {j:?} in {lo}..{hi}");
+                    if j.width > 0.0 {
+                        // (a handrail's post stands a few centimetres past the stairs' foot)
+                        let outside = j.at + j.out * 0.05;
+                        assert!(outside.x < lo.x || outside.x > hi.x || outside.z < lo.z || outside.z > hi.z, "{kind:?} {j:?}");
+                        // The dimension it follows gives its length.
+                        if let Some((dimension, per)) = j.follows {
+                            let of = if dimension == Dimension::Size { size } else { width };
+                            assert!((per * of - j.width).abs() < 1e-4, "{kind:?} {j:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(Piece::new(PieceKind::Kicker).joins().len(), 2);
+        assert_eq!(Piece::new(PieceKind::Platform).joins().len(), 4);
+        assert!(Piece::new(PieceKind::Bowl).joins().is_empty());
     }
 
     #[test]
