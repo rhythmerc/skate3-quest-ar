@@ -97,6 +97,13 @@ mod tests {
                 hidden: true,
                 finish: Some(crate::xr::build::pieces::Finish::Brick),
                 tint: Some(crate::xr::build::pieces::Tint { hue: 9, light: 2 }),
+                path: Some(crate::xr::build::pieces::drawn::Path {
+                    nodes: vec![
+                        crate::xr::build::pieces::drawn::Node::new(Vec3::ZERO, 0.0),
+                        crate::xr::build::pieces::drawn::Node { corner: true, bend: [0.2, -0.1], ..crate::xr::build::pieces::drawn::Node::new(Vec3::new(2.0, 0.5, 1.0), 0.1) },
+                    ],
+                    eased: true,
+                }),
             }],
             scale: Some(8.0),
             park_scale: Some(1.5),
@@ -115,5 +122,6 @@ mod tests {
         .unwrap();
         assert_eq!((old.pieces[0].scale, old.pieces[0].hidden), (1.0, false), "pieces from before 0.0.3 load");
         assert_eq!(old.pieces[0].finish, None, "and take their kind's own finish");
+        assert_eq!(old.pieces[0].path, None, "and their kind's own shape");
     }
 }

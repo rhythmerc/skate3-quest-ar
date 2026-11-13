@@ -9,6 +9,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::FRAC_PI_2;
 
+#[path = "drawn.rs"]
+pub(crate) mod drawn;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum PieceKind {
     Kicker,
@@ -28,11 +31,19 @@ pub(crate) enum PieceKind {
     /// A pool sunk into what it is placed on: its rim is level with that
     /// surface, which is opened over it (`xr::real_world`).
     Bowl,
+    /// Drawn (`drawn`): a rail through the points placed.
+    RailPath,
+    /// Drawn: a ramp or platform along the points placed, at their heights.
+    Deck,
+    /// Drawn: a level platform with the outline placed.
+    Pad,
+    /// Drawn: a bowl sunk into the surface, its lip the outline placed.
+    Pool,
 }
 
 impl PieceKind {
     /// Every kind, in the palette's order: ramps, rails, boxes, walls.
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::Kicker,
         Self::Bank,
         Self::QuarterPipe,
@@ -46,6 +57,10 @@ impl PieceKind {
         Self::Platform,
         Self::Stairs,
         Self::Wall,
+        Self::RailPath,
+        Self::Deck,
+        Self::Pad,
+        Self::Pool,
     ];
 
     /// What a player would call it.
@@ -64,7 +79,27 @@ impl PieceKind {
             Self::Wall => "Wall",
             Self::CurvedRail => "Curved rail",
             Self::Bowl => "Bowl",
+            Self::RailPath => "Draw a rail",
+            Self::Deck => "Draw a ramp",
+            Self::Pad => "Draw a pad",
+            Self::Pool => "Draw a bowl",
         }
+    }
+
+    /// What it is, placed ("remove this ...").
+    pub(crate) fn noun(self) -> String {
+        match self {
+            Self::RailPath => "rail".into(),
+            Self::Deck => "ramp".into(),
+            Self::Pad => "pad".into(),
+            Self::Pool => "bowl".into(),
+            other => other.name().to_lowercase(),
+        }
+    }
+
+    /// Whether its `size` changes it.
+    pub(crate) fn sized(self) -> bool {
+        !matches!(self, Self::RailPath | Self::Deck | Self::Pad)
     }
 
     /// What a piece's `size` is of ("stretch its ...").
@@ -73,7 +108,8 @@ impl PieceKind {
             Self::Kicker | Self::QuarterPipe | Self::HalfPipe | Self::Bank | Self::Stairs | Self::Spine => "height",
             Self::Rail | Self::Ledge | Self::FunBox | Self::Platform | Self::Wall => "length",
             Self::CurvedRail => "radius",
-            Self::Bowl => "depth",
+            Self::Bowl | Self::Pool => "depth",
+            Self::RailPath | Self::Deck | Self::Pad => "height",
         }
     }
 
@@ -88,26 +124,26 @@ impl PieceKind {
     /// The local direction its `width` stretches it along, if it has one.
     pub(crate) fn width_axis(self) -> Option<Vec3> {
         match self {
-            Self::Kicker | Self::Bank | Self::QuarterPipe | Self::Spine | Self::Stairs | Self::Bowl => Some(Vec3::X),
+            Self::Kicker | Self::Bank | Self::QuarterPipe | Self::Spine | Self::Stairs | Self::Bowl | Self::Deck => Some(Vec3::X),
             Self::HalfPipe | Self::Ledge | Self::FunBox | Self::Platform => Some(Vec3::Z),
-            Self::Rail | Self::CurvedRail | Self::Wall => None,
+            Self::Rail | Self::CurvedRail | Self::Wall | Self::RailPath | Self::Pad | Self::Pool => None,
         }
     }
 
     /// Whether the piece goes down into the surface under it, which is then
     /// opened over its footprint.
     pub(crate) fn sunk(self) -> bool {
-        self == Self::Bowl
+        matches!(self, Self::Bowl | Self::Pool)
     }
 
     pub(crate) fn color(self) -> Color {
         match self {
-            Self::Kicker => Color::srgb(0.85, 0.55, 0.25),
-            Self::QuarterPipe | Self::HalfPipe | Self::Bowl => Color::srgb(0.35, 0.6, 0.9),
-            Self::Rail | Self::CurvedRail => Color::srgb(0.85, 0.85, 0.9),
+            Self::Kicker | Self::Deck => Color::srgb(0.85, 0.55, 0.25),
+            Self::QuarterPipe | Self::HalfPipe | Self::Bowl | Self::Pool => Color::srgb(0.35, 0.6, 0.9),
+            Self::Rail | Self::CurvedRail | Self::RailPath => Color::srgb(0.85, 0.85, 0.9),
             Self::Ledge => Color::srgb(0.6, 0.6, 0.62),
             Self::FunBox => Color::srgb(0.9, 0.35, 0.4),
-            Self::Platform => Color::srgb(0.45, 0.75, 0.45),
+            Self::Platform | Self::Pad => Color::srgb(0.45, 0.75, 0.45),
             Self::Bank => Color::srgb(0.8, 0.65, 0.35),
             Self::Stairs => Color::srgb(0.7, 0.7, 0.68),
             Self::Spine => Color::srgb(0.3, 0.5, 0.85),
@@ -145,12 +181,12 @@ impl PieceKind {
     pub(crate) fn finishes(self) -> &'static [Finish] {
         use Finish::*;
         match self {
-            Self::Kicker | Self::Bank | Self::FunBox => &[Wood, Concrete, Paint],
+            Self::Kicker | Self::Bank | Self::FunBox | Self::Deck => &[Wood, Concrete, Paint],
             Self::QuarterPipe | Self::HalfPipe | Self::Spine => &[Wood, Concrete, Paint],
-            Self::Rail | Self::CurvedRail => &[Steel, Paint],
-            Self::Bowl => &[Concrete, Wood, Paint],
+            Self::Rail | Self::CurvedRail | Self::RailPath => &[Steel, Paint],
+            Self::Bowl | Self::Pool => &[Concrete, Wood, Paint],
             Self::Ledge | Self::Stairs => &[Concrete, Brick, Paint],
-            Self::Platform => &[Concrete, Wood, Brick, Paint],
+            Self::Platform | Self::Pad => &[Concrete, Wood, Brick, Paint],
             Self::Wall => &[Brick, Concrete, Wood, Paint],
         }
     }
@@ -357,6 +393,10 @@ impl Piece {
         let lift = self.lift;
         let mut g = PieceGeometry::default();
         match self.kind {
+            // (a drawn piece's shape is its path's: this is its icon)
+            PieceKind::RailPath | PieceKind::Deck | PieceKind::Pad | PieceKind::Pool => {
+                return drawn::Path::sample_of(self.kind).geometry(*self);
+            }
             PieceKind::Kicker => {
                 let (length, height) = (2.5 * s, 0.8 * s);
                 let profile: Vec<Vec2> = (0..=16)
@@ -568,7 +608,7 @@ const MIN_BOX_M: f32 = 0.1;
 impl PieceKind {
     /// Stands on posts, which reach down when it is joined higher up.
     pub(crate) fn on_posts(self) -> bool {
-        matches!(self, Self::Rail | Self::CurvedRail)
+        matches!(self, Self::Rail | Self::CurvedRail | Self::RailPath)
     }
 }
 
@@ -758,7 +798,7 @@ fn tube_quads(out: &mut Vec<[Vec3; 4]>, a: Vec3, b: Vec3, size: f32) {
 }
 
 /// Six faces of an axis-aligned box, bottom included (rail tubes float).
-fn box_quads(out: &mut Vec<[Vec3; 4]>, min: Vec3, max: Vec3) {
+pub(super) fn box_quads(out: &mut Vec<[Vec3; 4]>, min: Vec3, max: Vec3) {
     let c = |x: bool, y: bool, z: bool| {
         Vec3::new(
             if x { max.x } else { min.x },
@@ -785,7 +825,7 @@ pub(crate) fn quad_normal(q: &[Vec3; 4]) -> Vec3 {
 }
 
 /// Add `quad` facing `outward`, dropping degenerate (zero-area) quads.
-fn push(out: &mut Vec<[Vec3; 4]>, quad: [Vec3; 4], outward: Vec3) {
+pub(super) fn push(out: &mut Vec<[Vec3; 4]>, quad: [Vec3; 4], outward: Vec3) {
     let n = quad_normal(&quad) + (quad[3] - quad[0]).cross(quad[2] - quad[0]);
     if n.length_squared() < 1e-10 {
         return;
@@ -832,7 +872,8 @@ mod tests {
 
     #[test]
     fn a_lifted_piece_reaches_down_to_the_surface_and_keeps_its_top() {
-        for kind in PieceKind::ALL {
+        // (drawn pieces have their own tests: `drawn`)
+        for kind in PieceKind::ALL.into_iter().filter(|k| !k.drawn()) {
             let piece = Piece { lift: 0.7, ..Piece::new(kind) };
             let (plain, lifted) = (Piece::new(kind).geometry(), piece.geometry());
             let ((lo, hi), (plain_lo, plain_hi)) = (lifted.bounds(), plain.bounds());
@@ -966,7 +1007,8 @@ mod tests {
 
     #[test]
     fn textures_follow_a_transition_without_a_seam_or_a_stretch() {
-        for kind in PieceKind::ALL {
+        // (drawn pieces have their own tests: `drawn`)
+        for kind in PieceKind::ALL.into_iter().filter(|k| !k.drawn()) {
             let g = Piece::new(kind).geometry();
             let uvs = g.uvs();
             assert_eq!(uvs.len(), g.all_quads().count());
@@ -1055,7 +1097,8 @@ mod tests {
 
     #[test]
     fn width_stretches_only_the_kinds_that_have_one_and_only_across() {
-        for kind in PieceKind::ALL {
+        // (drawn pieces have their own tests: `drawn`)
+        for kind in PieceKind::ALL.into_iter().filter(|k| !k.drawn()) {
             let extent = |piece: Piece| {
                 let g = piece.geometry();
                 let (lo, hi) = g.all_quads().flatten().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)));

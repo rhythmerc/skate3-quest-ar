@@ -92,7 +92,7 @@ fn rebuild_collision(
         .filter(|item| item.piece.kind.sunk())
         .map(|item| {
             let at = item.world_transform(&root, placed.park_scale);
-            let (min, max) = item.piece.geometry().footprint();
+            let (min, max) = item.geometry().footprint();
             [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)].map(|(x, z)| at.transform_point(Vec3::new(x, 0.0, z)))
         })
         .collect();
@@ -105,7 +105,7 @@ fn rebuild_collision(
     for item in &placed.items {
         let at = item.world_transform(&root, placed.park_scale);
         let local = |p: Vec3| at.transform_point(p);
-        let geometry = item.piece.geometry();
+        let geometry = item.geometry();
         rails.extend(geometry.rails.iter().map(|r| r.iter().map(|&p| local(p)).collect()));
         // Rails, handrails and ramp copings are metal; ramps and boxes are
         // wood unless they are made of concrete or brick; stairs roll like
@@ -119,6 +119,8 @@ fn rebuild_collision(
                 | PieceKind::Spine
                 | PieceKind::Stairs
                 | PieceKind::Bowl
+                | PieceKind::RailPath
+                | PieceKind::Pool
         ) {
             for rail in &geometry.rails {
                 let rail: Vec<Vec3> = rail.iter().map(|&p| at.transform_point(p)).collect();
@@ -126,7 +128,7 @@ fn rebuild_collision(
             }
         }
         let wooden = matches!(item.finish(), Finish::Wood | Finish::Paint);
-        if wooden && !matches!(item.piece.kind, PieceKind::Rail | PieceKind::CurvedRail | PieceKind::Stairs) {
+        if wooden && !matches!(item.piece.kind, PieceKind::Rail | PieceKind::CurvedRail | PieceKind::Stairs | PieceKind::RailPath) {
             let corners = geometry.quads.iter().flatten().map(|&p| at.transform_point(p));
             let (min, max) = corners.fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| {
                 (lo.min(p), hi.max(p))
