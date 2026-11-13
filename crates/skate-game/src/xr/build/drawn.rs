@@ -20,6 +20,8 @@ pub(crate) const MAX_NODES: usize = 16;
 /// A drawn rail's top above its nodes, and its thickness (as the ready-made rail's).
 pub(crate) const RAIL_TOP: f32 = 0.5;
 const TUBE: f32 = 0.08;
+/// A rail's end posts stand this far in from its ends (less on a short rail).
+const END_POST_INSET: f32 = 0.6;
 /// A deck's width at width 1.
 const DECK_WIDTH: f32 = 2.0;
 /// A bowl's depth at size 1.
@@ -226,8 +228,30 @@ impl Path {
 fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
     let top: Vec<Vec3> = line.iter().map(|s| s.p + Vec3::Y * RAIL_TOP).collect();
     swept_tube(&mut g.rail_quads, &top, TUBE);
-    // A post under every node, and under the middle of a long stretch.
-    let mut posts: Vec<Sample> = path.nodes.iter().map(|n| Sample { p: n.p(), base: n.base }).collect();
+    // A post under every node, and under the middle of a long stretch. The
+    // two at the ends stand in from them, as the straight rail's do: under
+    // the very end, a post stands out past the tube's end face, and the
+    // board coming off the rail trips on it.
+    let length: f32 = line.windows(2).map(|w| w[0].p.distance(w[1].p)).sum();
+    let inset = END_POST_INSET.min(length * 0.2);
+    let from_end = |mut samples: Box<dyn Iterator<Item = &Sample> + '_>| {
+        let mut left = inset;
+        let mut at = *samples.next().expect("a rail has points");
+        for next in samples {
+            let step = at.p.distance(next.p);
+            if step >= left && step > 1e-6 {
+                let t = left / step;
+                return Sample { p: at.p.lerp(next.p, t), base: at.base + (next.base - at.base) * t };
+            }
+            left -= step;
+            at = *next;
+        }
+        at
+    };
+    let last = path.nodes.len() - 1;
+    let mut posts: Vec<Sample> = path.nodes[1..last].iter().map(|n| Sample { p: n.p(), base: n.base }).collect();
+    posts.insert(0, from_end(Box::new(line.iter())));
+    posts.push(from_end(Box::new(line.iter().rev())));
     for i in 0..path.stretches(false) {
         if path.nodes[i].p().distance(path.nodes[i + 1].p()) > 3.5 {
             posts.push(path.along(i, 0.5, false, true));
@@ -490,8 +514,10 @@ mod tests {
         assert!(line.windows(2).all(|w| w[0].distance(w[1]) > 1e-3 && w[0].distance(w[1]) < 1.2));
         // Three posts; the last from the surface it stands on.
         assert_eq!(g.quads.len(), 18);
-        let last_post_foot = g.quads.iter().flatten().filter(|p| p.x > 5.5).map(|p| p.y).fold(f32::MAX, f32::min);
-        assert!((last_post_foot - 0.4).abs() < 1e-5);
+        let last_post_foot = g.quads.iter().flatten().filter(|p| p.x > 5.0).map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!((last_post_foot - 0.4).abs() < 0.1, "{last_post_foot}");
+        // The end posts stand in from the ends: nothing of them past the tube's end faces, or near them.
+        assert!(g.quads.iter().flatten().all(|p| p.x > 0.5 && p.x < 5.6), "a post at the rail's end");
     }
 
     #[test]
