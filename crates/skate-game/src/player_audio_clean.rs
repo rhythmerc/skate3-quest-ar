@@ -223,7 +223,10 @@ struct Edges {
 
 #[cfg(feature = "retail")]
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<SurfaceHints>()
+    use bevy::audio::AddAudioSource;
+    // (as `install_sk8`: `setup` makes its sounds as this source, in either tier)
+    app.add_audio_source::<CleanPcm>()
+        .init_resource::<SurfaceHints>()
         .add_systems(Startup, setup)
         .add_systems(Update, (observe, frontend, mix, follow_skater).chain());
 }
