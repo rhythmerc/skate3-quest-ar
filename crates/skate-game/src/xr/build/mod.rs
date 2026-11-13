@@ -396,7 +396,9 @@ pub(crate) struct BuildPlugin;
 
 impl Plugin for BuildPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BuildMode>()
+        bevy::asset::embedded_asset!(app, "occluder.wgsl");
+        app.add_plugins(MaterialPlugin::<Occluder>::default())
+            .init_resource::<BuildMode>()
             .init_resource::<PlacedPieces>()
             .init_resource::<BuildState>()
             .init_resource::<PieceAssets>()
@@ -1071,6 +1073,7 @@ struct PieceAssets {
     /// A finish's photograph, and (true) that photograph without its own
     /// colour, to be given another.
     textures: HashMap<(Finish, bool), Handle<Image>>,
+    occluder: Option<Handle<Occluder>>,
     /// The ghost in free placement.
     ghost_free: Option<Handle<StandardMaterial>>,
     ghost: Option<Handle<StandardMaterial>>,
@@ -1118,8 +1121,10 @@ impl PieceAssets {
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look.texture.map_or(1.0, |(_, metres)| metres))),
             perceptual_roughness: look.roughness,
             metallic: look.metallic,
-            double_sided: true,
-            cull_mode: None,
+            // (a sunk piece is only its inside: its faces seen from behind, through the surface
+            // it is in, are not there)
+            double_sided: !kind.sunk(),
+            cull_mode: kind.sunk().then_some(bevy::render::render_resource::Face::Back),
             ..default()
         });
         self.solid.insert((kind, finish, tint), material.clone());
@@ -1235,12 +1240,20 @@ fn halve(pixels: &[u8], width: usize, height: usize) -> Vec<u8> {
 }
 
 fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
+    let seen = |index: &usize| !geometry.unseen.contains(index);
     let positions: Vec<[f32; 3]> = geometry
         .all_quads()
-        .flat_map(|q| [0, 2, 1, 0, 3, 2].map(|i| q[i].to_array()))
+        .enumerate()
+        .filter(|(i, _)| seen(i))
+        .flat_map(|(_, q)| [0, 2, 1, 0, 3, 2].map(|i| q[i].to_array()))
         .collect();
-    let uvs: Vec<[f32; 2]> =
-        geometry.uvs().iter().flat_map(|uv| [0, 2, 1, 0, 3, 2].map(|i| uv[i].to_array())).collect();
+    let uvs: Vec<[f32; 2]> = geometry
+        .uvs()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| seen(i))
+        .flat_map(|(_, uv)| [0, 2, 1, 0, 3, 2].map(|i| uv[i].to_array()))
+        .collect();
     let mut mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
@@ -1249,6 +1262,30 @@ fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.compute_flat_normals();
     mesh
+}
+
+/// A sunk piece's outside, drawn as nothing but depth (see `occluder.wgsl`): the piece's own
+/// mesh, only the faces that look away.
+#[derive(Asset, TypePath, bevy::render::render_resource::AsBindGroup, Clone, Default)]
+struct Occluder {
+    #[uniform(0)]
+    _unused: Vec4,
+}
+
+impl Material for Occluder {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "embedded://skate_game/xr/build/occluder.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Front);
+        Ok(())
+    }
 }
 
 /// A placed piece's entity: its id, shape, whether it is drawn as a ghost,
@@ -1376,6 +1413,7 @@ fn sync_pieces(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut occluders: ResMut<Assets<Occluder>>,
     mut visuals: Query<(Entity, &PlacedVisual, &mut Transform, &mut Visibility)>,
 ) {
     let Some(root) = rig.root_transform() else {
@@ -1402,13 +1440,21 @@ fn sync_pieces(
         } else {
             assets.solid(item.piece.kind, item.finish(), item.tint, &mut materials, &mut images)
         };
-        commands.spawn((
-            PlacedVisual(item.id, item.piece, item.hidden, item.finish(), item.tint),
-            Mesh3d(assets.mesh(item.piece, &mut meshes)),
-            MeshMaterial3d(material),
-            item.world_transform(&root, placed.park_scale),
-            if item.hidden && !see_hidden { Visibility::Hidden } else { Visibility::Inherited },
-        ));
+        let visual = commands
+            .spawn((
+                PlacedVisual(item.id, item.piece, item.hidden, item.finish(), item.tint),
+                Mesh3d(assets.mesh(item.piece, &mut meshes)),
+                MeshMaterial3d(material),
+                item.world_transform(&root, placed.park_scale),
+                if item.hidden && !see_hidden { Visibility::Hidden } else { Visibility::Inherited },
+            ))
+            .id();
+        // Sunk into a surface: from the side that surface hides it (its own outside does, drawn
+        // into depth only).
+        if item.piece.kind.sunk() && !item.hidden {
+            let occluder = assets.occluder.get_or_insert_with(|| occluders.add(Occluder::default())).clone();
+            commands.spawn((Mesh3d(assets.mesh(item.piece, &mut meshes)), MeshMaterial3d(occluder), Transform::default(), ChildOf(visual)));
+        }
     }
 }
 

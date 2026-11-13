@@ -67,6 +67,8 @@ struct RoomMeshView;
 
 /// Which overlay layers are drawn now: (floors, planes, 3D mesh).
 fn drawn(settings: &ArSettings, building: bool) -> (bool, bool, bool) {
+    // (while building, only if asked for: Build a park > Show the room's surfaces)
+    let building = building && settings.build_surfaces;
     (
         settings.floor.show || (building && settings.floor.collide),
         settings.planes.show || (building && settings.planes.collide),

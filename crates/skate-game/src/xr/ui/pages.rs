@@ -400,6 +400,7 @@ fn build_widgets(world: &World) -> Vec<Widget> {
     w.extend([
         Widget::toggle("show_hidden", "Show invisible pieces while skating", placed.show_hidden),
         Widget::toggle("build_hints", "Build hints: the controls beside the controllers", world.resource::<ArSettings>().build_hints),
+        Widget::toggle("build_surfaces", "Show the room's surfaces while building", world.resource::<ArSettings>().build_surfaces),
         Widget::button("undo", "Undo"),
         Widget::button("clear", "Clear every piece"),
         Widget::info(format!("{} pieces", placed.items.len())),
@@ -453,6 +454,10 @@ fn build_act(widget: &str, act: Act, world: &mut World) -> Option<Outcome> {
         }
         "build_hints" => {
             edit(world, |s| s.build_hints = !s.build_hints);
+            Outcome::Stay
+        }
+        "build_surfaces" => {
+            edit(world, |s| s.build_surfaces = !s.build_surfaces);
             Outcome::Stay
         }
         "undo" => {

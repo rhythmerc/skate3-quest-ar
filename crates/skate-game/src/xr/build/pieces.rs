@@ -233,6 +233,9 @@ pub(crate) struct PieceGeometry {
     /// Texture coordinates of the `quads` that bring their own (by index):
     /// surfaces curved two ways, which [`Self::uvs`] can't unroll.
     pub given_uvs: Vec<(usize, [Vec2; 4])>,
+    /// The `quads` (by index) that are ridden but not drawn: where a sunk
+    /// piece's rectangle is still the surface it is sunk into.
+    pub unseen: Vec<usize>,
 }
 
 impl PieceGeometry {
@@ -553,12 +556,15 @@ fn bowl(g: &mut PieceGeometry, radius: f32, floor: Vec2) {
         Vec3::new(floor.x, -radius, floor.y),
         Vec3::new(-floor.x, -radius, floor.y),
     ], Vec3::Y);
-    // The rim's corners, out to the rectangle.
+    // The rim's corners, out to the rectangle: still the surface the bowl is in, so ridden but
+    // not drawn.
     for (i, &c) in corners.iter().enumerate() {
         let square = Vec3::new(c.x * (floor.x + radius), 0.0, c.y * (floor.y + radius));
         let first = i * (CORNER + 1);
         for j in (first..first + CORNER).step_by(2) {
+            let before = g.quads.len();
             push(&mut g.quads, [square, ring(RINGS, j), ring(RINGS, j + 1), ring(RINGS, j + 2)], Vec3::Y);
+            g.unseen.extend(before..g.quads.len());
         }
     }
     // The rim is coping all the way round.
@@ -833,6 +839,9 @@ mod tests {
             .sum();
         let rectangle = (max.x - min.x) * (max.y - min.y);
         assert!((area - rectangle).abs() < 0.02 * rectangle, "seen from above it fills its rectangle: {area} of {rectangle}");
+        // Its corners are ridden, not drawn.
+        assert_eq!(g.unseen.len(), 4 * 3);
+        assert!(g.unseen.iter().all(|&i| g.quads[i].iter().all(|p| p.y.abs() < 1e-6)));
         // The coping runs all the way round, at the rim.
         let rim = &g.rails[0];
         assert!(rim[0].distance(*rim.last().unwrap()) < 1e-4 && rim.iter().all(|p| p.y.abs() < 1e-5));

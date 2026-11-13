@@ -78,6 +78,9 @@ pub(crate) struct ArSettings {
     /// Build mode's legend beside the controllers (`xr::build::legend`).
     #[serde(default = "yes")]
     pub build_hints: bool,
+    /// Build mode draws the room's surfaces that are ridden (the overlay).
+    #[serde(default)]
+    pub build_surfaces: bool,
     #[serde(skip)]
     pub revision: u64,
 }
@@ -96,6 +99,7 @@ impl Default for ArSettings {
             room_light: false,
             room_light_strength: 1.0,
             build_hints: true,
+            build_surfaces: false,
             revision: 0,
         }
     }
