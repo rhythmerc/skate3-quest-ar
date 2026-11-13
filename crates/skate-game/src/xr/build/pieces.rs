@@ -308,6 +308,45 @@ pub(crate) struct PieceGeometry {
     /// The `quads` (by index) that are ridden but not drawn: where a sunk
     /// piece's rectangle is still the surface it is sunk into.
     pub unseen: Vec<usize>,
+    /// A rail's posts: where each one's faces are in `quads` (the first,
+    /// and how many), so the ones over a bowl can be left out.
+    pub posts: Vec<(usize, usize)>,
+}
+
+/// A rail's post: a box, kept track of in [`PieceGeometry::posts`].
+pub(super) fn post(g: &mut PieceGeometry, min: Vec3, max: Vec3) {
+    let first = g.quads.len();
+    box_quads(&mut g.quads, min, max);
+    g.posts.push((first, g.quads.len() - first));
+}
+
+impl PieceGeometry {
+    /// Each post's middle over the ground (x, z).
+    pub(crate) fn post_places(&self) -> Vec<Vec2> {
+        self.posts
+            .iter()
+            .map(|&(first, count)| {
+                let corners = self.quads[first..first + count].iter().flatten();
+                let sum = corners.clone().fold(Vec3::ZERO, |sum, p| sum + *p);
+                (sum / corners.count().max(1) as f32).xz()
+            })
+            .collect()
+    }
+
+    /// Without the posts whose bit is set in `left_out`.
+    pub(crate) fn without_posts(mut self, left_out: u32) -> Self {
+        // (only rails have posts, and they have no faces known by index)
+        if left_out == 0 || !self.given_uvs.is_empty() || !self.unseen.is_empty() {
+            return self;
+        }
+        let posts = std::mem::take(&mut self.posts);
+        for (index, &(first, count)) in posts.iter().enumerate().rev() {
+            if index < 32 && left_out & (1 << index) != 0 {
+                self.quads.drain(first..first + count);
+            }
+        }
+        self
+    }
 }
 
 impl PieceGeometry {
@@ -471,7 +510,7 @@ impl Piece {
                 box_quads(&mut tube_faces, Vec3::new(-x, top - tube, -tube * 0.5), Vec3::new(x, top, tube * 0.5));
                 g.rail_quads = tube_faces;
                 for px in [-x + 0.6, x - 0.6] {
-                    box_quads(&mut g.quads, Vec3::new(px - 0.04, -lift.max(0.0), -0.04), Vec3::new(px + 0.04, top - tube, 0.04));
+                    post(&mut g, Vec3::new(px - 0.04, -lift.max(0.0), -0.04), Vec3::new(px + 0.04, top - tube, 0.04));
                 }
                 g.rails.push(vec![Vec3::new(-x, top, 0.0), Vec3::new(x, top, 0.0)]);
             }
@@ -525,7 +564,7 @@ impl Piece {
                 let points: Vec<Vec3> = (0..=segments).map(point).collect();
                 swept_tube(&mut g.rail_quads, &points, tube);
                 for p in [points[1], points[segments / 2], points[segments - 1]] {
-                    box_quads(&mut g.quads, Vec3::new(p.x - 0.04, -lift.max(0.0), p.z - 0.04), Vec3::new(p.x + 0.04, top - tube, p.z + 0.04));
+                    post(&mut g, Vec3::new(p.x - 0.04, -lift.max(0.0), p.z - 0.04), Vec3::new(p.x + 0.04, top - tube, p.z + 0.04));
                 }
                 g.rails.push(points);
             }

@@ -236,7 +236,7 @@ fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
     for post in posts {
         let (p, top) = (post.p, post.p.y + RAIL_TOP - TUBE);
         if top > post.base {
-            box_quads(&mut g.quads, Vec3::new(p.x - 0.04, post.base, p.z - 0.04), Vec3::new(p.x + 0.04, top, p.z + 0.04));
+            super::post(g, Vec3::new(p.x - 0.04, post.base, p.z - 0.04), Vec3::new(p.x + 0.04, top, p.z + 0.04));
         }
     }
     g.rails.push(top);

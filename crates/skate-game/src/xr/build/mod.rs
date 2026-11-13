@@ -132,6 +132,10 @@ pub(crate) struct Placed {
     /// Not drawn (outside build mode), still skated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Its posts (by bit) that would stand in a bowl and are left out
+    /// (`no_posts_over_bowls`); not saved.
+    #[serde(skip)]
+    pub no_posts: u32,
     /// What it is made of; absent (layouts from before finishes, and pieces
     /// left as they come): its kind's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +198,11 @@ impl Placed {
 
     /// What is ridden and drawn: its path's shape if it was drawn, else its kind's.
     pub(crate) fn geometry(&self) -> PieceGeometry {
+        self.whole_geometry().without_posts(self.no_posts)
+    }
+
+    /// With every post, the ones over a bowl too.
+    fn whole_geometry(&self) -> PieceGeometry {
         match &self.path {
             Some(path) => path.geometry(self.piece),
             None => self.piece.geometry(),
@@ -202,7 +211,7 @@ impl Placed {
 
     /// Changes whenever its shape would.
     fn shape_key(&self) -> u64 {
-        self.path.as_ref().map_or(0, drawn::Path::key)
+        self.path.as_ref().map_or(0, drawn::Path::key) ^ u64::from(self.no_posts).wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 
     /// A tracking-space point in the piece's own metres, and back.
@@ -316,6 +325,7 @@ impl PlacedPieces {
             yaw,
             scale,
             hidden: false,
+            no_posts: 0,
             finish: None,
             tint: None,
             path: None,
@@ -515,8 +525,63 @@ impl Plugin for BuildPlugin {
             )
             .add_plugins(legend::LegendPlugin)
             .add_plugins(anchor::AnchorPlugin)
+            .add_systems(Update, no_posts_over_bowls.before(sync_pieces))
             .add_systems(Update, (sync_pieces, show_build, show_edit, show_drawn, describe, layout::save, drop_after_park_scale));
     }
+}
+
+/// A rail's posts are left out where they would stand in a bowl: which
+/// ones is worked out again whenever the layout changes.
+fn no_posts_over_bowls(rig: Res<Rig>, mut placed: ResMut<PlacedPieces>, mut seen: Local<Option<u64>>) {
+    if placed.busy() || *seen == Some(placed.revision) {
+        return;
+    }
+    let metres = placed.park_scale / rig.scale;
+    let masks = posts_over_bowls(&placed.items, metres);
+    if placed.items.iter().zip(&masks).any(|(item, mask)| item.no_posts != *mask) {
+        let placed = &mut *placed;
+        for (item, mask) in placed.items.iter_mut().zip(masks) {
+            item.no_posts = mask;
+        }
+        // (the collision and the pieces' meshes are made again)
+        placed.revision += 1;
+    }
+    *seen = Some(placed.revision);
+}
+
+/// For each piece, its posts (by bit) that stand over the inside of a sunk
+/// piece: where that piece has a face under its rim. `metres` is real
+/// metres per metre of a piece at scale 1.
+fn posts_over_bowls(items: &[Placed], metres: f32) -> Vec<u32> {
+    let bowls: Vec<(&Placed, Vec<[Vec3; 4]>)> = items
+        .iter()
+        .filter(|item| item.piece.kind.sunk())
+        .map(|item| (item, item.geometry().quads.into_iter().filter(|q| q.iter().any(|p| p.y < -0.02)).collect()))
+        .collect();
+    items
+        .iter()
+        .map(|item| {
+            if bowls.is_empty() || !item.piece.kind.on_posts() {
+                return 0;
+            }
+            let mut mask = 0u32;
+            for (index, place) in item.whole_geometry().post_places().into_iter().enumerate().take(32) {
+                let at = item.from_local(metres, Vec3::new(place.x, 0.0, place.y));
+                let over = bowls.iter().any(|(bowl, faces)| {
+                    let p = bowl.to_local(metres, at);
+                    faces.iter().any(|q| {
+                        let side = |a: Vec3, b: Vec3| (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
+                        let sides = [side(q[0], q[1]), side(q[1], q[2]), side(q[2], q[3]), side(q[3], q[0])];
+                        sides.iter().all(|s| *s >= 0.0) || sides.iter().all(|s| *s <= 0.0)
+                    })
+                });
+                if over {
+                    mask |= 1 << index;
+                }
+            }
+            mask
+        })
+        .collect()
 }
 
 fn toggle_build(
@@ -872,6 +937,7 @@ fn build_controls(
                 yaw: 0.0,
                 scale: snap_scale(state.scale),
                 hidden: false,
+                no_posts: 0,
                 finish: None,
                 tint: None,
                 path: None,
@@ -1995,9 +2061,10 @@ fn sync_pieces(
             assets.solid(item.piece.kind, item.finish(), item.tint, &mut materials, &mut images)
         };
         // (a drawn piece's mesh is its own)
-        let mesh = match &item.path {
-            Some(_) => meshes.add(piece_mesh(&item.geometry())),
-            None => assets.mesh(item.piece, &mut meshes),
+        let mesh = match (&item.path, item.no_posts) {
+            (None, 0) => assets.mesh(item.piece, &mut meshes),
+            // (so is a rail's with posts left out)
+            _ => meshes.add(piece_mesh(&item.geometry())),
         };
         let visual = commands
             .spawn((
@@ -2283,9 +2350,9 @@ fn show_edit(
                 item.map(|item| {
                     if mark.1 != Some((item.piece, item.shape_key())) {
                         mark.1 = Some((item.piece, item.shape_key()));
-                        let mesh = match &item.path {
-                            Some(_) => meshes.add(piece_mesh(&item.geometry())),
-                            None => assets.mesh(item.piece, &mut meshes),
+                        let mesh = match (&item.path, item.no_posts) {
+                            (None, 0) => assets.mesh(item.piece, &mut meshes),
+                            _ => meshes.add(piece_mesh(&item.geometry())),
                         };
                         commands.entity(entity).insert(Mesh3d(mesh));
                     }
@@ -2346,4 +2413,41 @@ fn icon_extent(kind: PieceKind) -> f32 {
         .flatten()
         .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)));
     (max - min).max_element().max(0.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rail_has_no_posts_in_a_bowl() {
+        let item = |id, kind, position: [f32; 3]| Placed {
+            id,
+            piece: Piece::new(kind),
+            position,
+            yaw: 0.0,
+            scale: 1.0,
+            hidden: false,
+            no_posts: 0,
+            finish: None,
+            tint: None,
+            path: None,
+        };
+        // A rail (posts 2.4 m either side of its middle) with one end over a bowl, and one well clear.
+        let bowl = item(1, PieceKind::Bowl, [0.0, 0.0, 0.0]);
+        let over = item(2, PieceKind::Rail, [2.4, 0.0, 0.0]);
+        let clear = item(3, PieceKind::Rail, [0.0, 0.0, 9.0]);
+        let mut items = vec![bowl, over, clear];
+        let masks = posts_over_bowls(&items, 1.0);
+        assert_eq!(masks, vec![0, 0b01, 0], "the post at the bowl's middle goes, the other stays");
+        let whole = items[1].geometry().quads.len();
+        items[1].no_posts = masks[1];
+        let g = items[1].geometry();
+        assert_eq!(g.quads.len(), whole - 6);
+        assert!(g.quads.iter().flatten().all(|p| p.x > 0.0), "the post left is the far one");
+        assert_eq!(g.rail_quads.len(), 6, "the rail itself is whole");
+        assert_ne!(items[1].shape_key(), items[2].shape_key(), "and its mesh is made again");
+        // No bowl: every post.
+        assert_eq!(posts_over_bowls(&items[1..], 1.0), vec![0, 0]);
+    }
 }
