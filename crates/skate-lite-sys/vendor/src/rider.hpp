@@ -23,6 +23,8 @@ public:
 
 	Params p;
 	unsigned flags = 0;
+	// On foot the stick is relative to this view (zero: to the walker), see sk8_rider_set_walk_view.
+	V3 walk_view{};
 	std::deque<sk8_event> events;
 
 private:

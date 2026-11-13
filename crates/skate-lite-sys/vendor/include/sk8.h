@@ -269,6 +269,12 @@ enum
 void sk8_rider_set_flags(sk8_rider *rider, unsigned flags);
 unsigned sk8_rider_flags(const sk8_rider *rider);
 
+/* On foot, whose stick it is. With a view (the direction the player looks along; only its level
+ * part counts) the left stick is theirs: up walks away from them, right to their right, and the
+ * walker turns to face the way they go. NULL or a zero direction: the stick is the walker's own,
+ * turning them (x) and walking them on or back (y). */
+void sk8_rider_set_walk_view(sk8_rider *rider, const float direction[3]);
+
 /* ---------- tuning: every value the mod menu can change */
 
 typedef struct sk8_param

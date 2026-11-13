@@ -48,16 +48,24 @@ impl Default for PlayerControls {
     }
 }
 
+/// The view the off-board stick is relative to when it isn't the game
+/// camera's: in the headset the player sees the skater with their own eyes
+/// (the game camera isn't drawn), so "up" on the stick has to be away from
+/// them. The native presentation basis (right, up, at) of that view.
+#[derive(Resource, Default)]
+pub(crate) struct OffboardView(pub Option<[[f32; 3]; 3]>);
+
 pub(super) fn sample(
     input: Res<PublishedTickInput>,
     physics: Res<GamePhysics>,
     skater: Res<SkaterRuntime>,
     camera: Res<crate::camera::CameraRuntime>,
+    view: Option<Res<OffboardView>>,
     mut player: ResMut<PlayerControls>,
 ) {
     let mut map = input.0.actions();
     player
-        .update_for_physics(&mut map, &physics, &skater, &camera)
+        .update_for_physics(&mut map, &physics, &skater, &camera, view.and_then(|v| v.0))
         .unwrap_or_else(|error| panic!("Offboard controller publication: {error}"));
     // Endless Tricks extends which gestures may be held; off, this is the stock set.
     player.endless_families = physics.trainer.endless_flips;
@@ -76,6 +84,7 @@ impl PlayerControls {
         physics: &GamePhysics,
         skater: &SkaterRuntime,
         camera: &crate::camera::CameraRuntime,
+        view: Option<[[f32; 3]; 3]>,
     ) -> Result<(), String> {
         let physical = &skater.player_input.physical;
         //82DB7678/7694 writes category and State75 from the same category==500.
@@ -88,9 +97,10 @@ impl PlayerControls {
                 .frame
                 .as_ref()
                 .ok_or("Native offboard input requires a completed presentation camera frame")?;
+            // (the player's own view, where there is one, stands in for the camera's)
             Some(camera_relative_axes(
                 [map.value(64), map.value(65)],
-                frame.basis.columns,
+                view.unwrap_or(frame.basis.columns),
             ))
         } else {
             None

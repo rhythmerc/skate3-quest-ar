@@ -77,7 +77,7 @@ fn falling_dismount(release_board: bool, drop: f32, complete_landing: bool) {
         });
         let mut actions = input.player_actions();
         controls
-            .update_for_physics(&mut actions, &physics, &skater, &camera)
+            .update_for_physics(&mut actions, &physics, &skater, &camera, None)
             .unwrap();
         frame::advance(
             &mut physics,

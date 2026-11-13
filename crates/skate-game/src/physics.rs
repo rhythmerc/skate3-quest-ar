@@ -76,7 +76,7 @@ use crate::{
     world::PlayerRoot,
 };
 use bevy::prelude::*;
-pub(crate) use controls::PlayerControls;
+pub(crate) use controls::{OffboardView, PlayerControls};
 use riding_outputs::RidingOutputs;
 use settings::PhysicsSettings;
 #[cfg(test)]

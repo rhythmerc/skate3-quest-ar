@@ -86,6 +86,11 @@ void sk8_rider_bail(sk8_rider *rider) { rider->r.bail("Bailed"); }
 void sk8_rider_set_flags(sk8_rider *rider, unsigned flags) { rider->r.flags = flags; }
 unsigned sk8_rider_flags(const sk8_rider *rider) { return rider->r.flags; }
 
+void sk8_rider_set_walk_view(sk8_rider *rider, const float direction[3])
+{
+	rider->r.walk_view = direction ? sk8::V3(direction) : sk8::V3{};
+}
+
 int sk8_param_count(void) { return sk8::ParamCount; }
 
 const sk8_param *sk8_param_at(int index)

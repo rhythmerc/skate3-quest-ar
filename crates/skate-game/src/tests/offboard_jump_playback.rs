@@ -110,7 +110,7 @@ fn jump_playback_with_tweak(throw_board: bool, tweak: bool) {
         });
         let mut actions = input.player_actions();
         controls
-            .update_for_physics(&mut actions, &physics, &skater, &camera)
+            .update_for_physics(&mut actions, &physics, &skater, &camera, None)
             .unwrap();
         frame::advance(&mut physics, &mut skater, &mut controls,
             &graphs, &mut actions, true, &mut camera)

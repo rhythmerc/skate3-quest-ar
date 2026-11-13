@@ -424,6 +424,7 @@ unsafe extern "C" {
     fn sk8_rider_trick(rider: *const RawRider) -> *const c_char;
     fn sk8_rider_bail(rider: *mut RawRider);
     fn sk8_rider_set_flags(rider: *mut RawRider, flags: c_uint);
+    fn sk8_rider_set_walk_view(rider: *mut RawRider, direction: *const f32);
     fn sk8_rider_flags(rider: *const RawRider) -> c_uint;
 
     fn sk8_param_count() -> c_int;
@@ -629,6 +630,14 @@ impl Rider {
         unsafe { sk8_rider_set_flags(self.raw, flags) }
     }
 
+    /// On foot, whose stick it is: with a view (the direction the player
+    /// looks along) up on the stick walks away from them and right to their
+    /// right; without, the stick turns the walker and walks them on or back.
+    pub fn set_walk_view(&mut self, direction: Option<[f32; 3]>) {
+        let direction = direction.unwrap_or([0.0; 3]);
+        unsafe { sk8_rider_set_walk_view(self.raw, direction.as_ptr()) }
+    }
+
     pub fn param(&self, index: usize) -> f32 {
         unsafe { sk8_rider_param(self.raw, index as c_int) }
     }
@@ -748,6 +757,57 @@ mod tests {
         assert!(top > 0.3, "ollie height {top}");
         assert!(events.iter().any(|e| e.kind == EventKind::Pop && e.name == "Ollie"));
         assert!(events.iter().any(|e| e.kind == EventKind::Land && e.surface == 7));
+    }
+
+    /// Off the board, the stick held one way for `steps` as a player looking along `view` sees it:
+    /// how far the walker went, and which way they face.
+    fn walked(view: Option<[f32; 3]>, steer: [f32; 2], steps: usize) -> ([f32; 3], [f32; 2]) {
+        let mut world = World::new(Box::new(Floor));
+        let mut rider = Rider::new();
+        rider.place([0.0, 0.0, 0.0], 0.0, 0.0);
+        rider.set_walk_view(view);
+        rider.step(&mut world, &Input { buttons: buttons::OFF_BOARD, ..Default::default() });
+        for _ in 0..30 {
+            rider.step(&mut world, &Input::default());
+        }
+        assert_eq!(rider.state().mode, Mode::Walk);
+        let from = rider.state().position;
+        for _ in 0..steps {
+            rider.step(&mut world, &Input { steer, ..Default::default() });
+        }
+        let s = rider.state();
+        // (the stance frame's +Z, flat)
+        let [x, y, z, w] = s.rider_rot;
+        let facing = [2.0 * (x * z + w * y), 1.0 - 2.0 * (x * x + y * y)];
+        ([s.position[0] - from[0], s.position[1] - from[1], s.position[2] - from[2]], facing)
+    }
+
+    #[test]
+    fn on_foot_with_a_view_the_stick_is_the_players_and_answers_at_once() {
+        // The walker starts facing +Z. (view, its level ahead, its right)
+        let views = [([0.0, 0.0, 1.0], [0.0, 1.0], [-1.0, 0.0]), ([1.0, -0.8, 0.0], [1.0, 0.0], [0.0, 1.0]), ([0.0, 0.0, -1.0], [0.0, -1.0], [1.0, 0.0])];
+        for (view, ahead, right) in views {
+            let ways = [([0.0, 1.0], ahead), ([1.0, 0.0], right), ([-1.0, 0.0], [-right[0], -right[1]]), ([0.0, -1.0], [-ahead[0], -ahead[1]])];
+            for (steer, want) in ways {
+                let (went, facing) = walked(Some(view), steer, 120);
+                let along = went[0] * want[0] + went[2] * want[1];
+                let aside = (went[0] * want[1] - went[2] * want[0]).abs();
+                assert!(along > 6.0 && aside < 0.6, "view {view:?} stick {steer:?}: went {went:?}");
+                assert!(facing[0] * want[0] + facing[1] * want[1] > 0.99, "and faces that way: {facing:?}");
+                // Half a second is enough to be well on the way, whichever way they faced.
+                let (soon, _) = walked(Some(view), steer, 30);
+                assert!(soon[0] * want[0] + soon[2] * want[1] > 1.0, "view {view:?} stick {steer:?}: after half a second {soon:?}");
+            }
+        }
+        assert!(walked(Some([0.0, 0.0, 1.0]), [0.05, 0.05], 60).0.iter().all(|v| v.abs() < 0.02), "a resting stick stands still");
+    }
+
+    #[test]
+    fn on_foot_without_a_view_the_stick_still_turns_and_walks() {
+        let (went, _) = walked(None, [0.0, 1.0], 120);
+        assert!(went[2] > 6.0 && went[0].abs() < 0.1, "straight on along +Z: {went:?}");
+        let (_, facing) = walked(None, [1.0, 0.0], 30);
+        assert!(facing[0].abs() > 0.5, "turned on the spot: {facing:?}");
     }
 
     #[test]

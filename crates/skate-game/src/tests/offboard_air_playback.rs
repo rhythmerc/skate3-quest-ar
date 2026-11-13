@@ -85,7 +85,7 @@ fn offboard_walk_off_edge_runs_ground_air_and_landing() {
         });
         let mut actions = input.player_actions();
         controls
-            .update_for_physics(&mut actions, &physics, &skater, &camera)
+            .update_for_physics(&mut actions, &physics, &skater, &camera, None)
             .unwrap();
         frame::advance(
             &mut physics,

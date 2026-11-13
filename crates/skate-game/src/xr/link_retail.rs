@@ -12,8 +12,24 @@ pub(crate) struct RetailLinkPlugin;
 
 impl Plugin for RetailLinkPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (apply_world, teleport, publish_pose, publish_hud).chain());
+        app.init_resource::<crate::physics::OffboardView>()
+            .add_systems(Update, (apply_world, teleport, publish_pose, publish_hud).chain())
+            .add_systems(PreUpdate, publish_view);
     }
+}
+
+/// Off the board the stick is relative to what the player sees: their eyes,
+/// not the game camera (which the headset doesn't draw).
+fn publish_view(
+    rig: Res<crate::xr::rig::Rig>,
+    eyes: Query<&Transform, With<bevy_mod_xr::camera::XrCamera>>,
+    mut view: ResMut<crate::physics::OffboardView>,
+) {
+    view.0 = rig.root_transform().zip(eyes.iter().next()).map(|(root, eye)| {
+        let rotation = root.rotation * eye.rotation;
+        // The native presentation basis: right is -X and at is -Z of the view (`presentation`).
+        [-(rotation * Vec3::X), rotation * Vec3::Y, -(rotation * Vec3::Z)].map(|axis| axis.to_array())
+    });
 }
 
 fn v(p: Vec3) -> Vector3 {

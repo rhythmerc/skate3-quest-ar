@@ -68,6 +68,8 @@ pub(crate) fn read_touch(
     touch: Res<crate::xr::actions::LatestTouch>,
     build: Res<crate::xr::build::BuildMode>,
     ui: Res<UiCapture>,
+    rig: Option<Res<crate::xr::rig::Rig>>,
+    eyes: Query<&Transform, With<bevy_mod_xr::camera::XrCamera>>,
     mut sim: ResMut<CleanSkate>,
 ) {
     let t = &touch.0;
@@ -76,6 +78,10 @@ pub(crate) fn read_touch(
     } else {
         from_touch(t)
     };
+    // On foot the stick is the player's own: up is away from them, right is their right (the
+    // engine's walk view: where they look).
+    let view = rig.and_then(|r| r.root_transform()).zip(eyes.iter().next()).map(|(root, eye)| root.rotation * (eye.rotation * Vec3::NEG_Z));
+    sim.rider.set_walk_view(view.map(|v| v.to_array()));
 }
 
 /// `SK8_DEMO=grabs`: push, then an ollie into each of the twenty-one grab styles in turn, the port's
@@ -831,3 +837,4 @@ pub(crate) fn read_desktop(
     }
     sim.input = input;
 }
+

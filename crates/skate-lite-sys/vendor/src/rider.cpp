@@ -2240,9 +2240,12 @@ void Rider::land(const Hit &h)
 
 namespace {
 constexpr float kWalkSpeed = 1.437f, kRunSpeed = 3.7f, kWalkTurn = 2.6f; // m/s, m/s, rad/s
+constexpr float kWalkFace = 14.0f; // rad/s: how fast the walker faces the way they are sent
 } // namespace
 
-// On foot: the left stick turns (x) and walks or runs (y, past 0.8 a run), the board in the hand.
+// On foot, the board in the hand. The left stick turns (x) and walks or runs (y, past 0.8 a run);
+// or, given a view (walk_view), it is the player's: the walker goes the way it is pushed as they
+// see it, at once, and turns to face that way.
 void Rider::walk(World &w, const sk8_input &in)
 {
 	float x = clampf(steer_pad_[0], -1, 1), y = clampf(steer_pad_[1], -1, 1);
@@ -2256,11 +2259,25 @@ void Rider::walk(World &w, const sk8_input &in)
 		pos_ += kUp * 0.02f;
 		return;
 	}
-	fwd_ = unit(flatten(rotate(fwd_, up_, -x * kWalkTurn * kDt), up_), fwd_);
-	float want = std::fabs(y) > 0.8f ? kRunSpeed : kWalkSpeed * std::fabs(y) / 0.8f;
-	V3 target = fwd_ * (want * (y < 0 ? -0.5f : 1.0f));
-	if (std::fabs(y) < 0.15f)
-		target = V3{};
+	V3 target{};
+	V3 view = flatten(walk_view, up_);
+	if (dot(view, view) > 1e-6f) {
+		V3 ahead = unit(view, fwd_), right = cross(ahead, up_);
+		V3 way = right * x + ahead * y;
+		float push = std::min(1.0f, len(way));
+		if (push >= 0.15f) {
+			way = unit(way, fwd_);
+			float turn = std::atan2(dot(cross(fwd_, way), up_), dot(fwd_, way));
+			fwd_ = unit(flatten(rotate(fwd_, up_, clampf(turn, -kWalkFace * kDt, kWalkFace * kDt)), up_), fwd_);
+			target = way * (push > 0.8f ? kRunSpeed : kWalkSpeed * push / 0.8f);
+		}
+	} else {
+		fwd_ = unit(flatten(rotate(fwd_, up_, -x * kWalkTurn * kDt), up_), fwd_);
+		float want = std::fabs(y) > 0.8f ? kRunSpeed : kWalkSpeed * std::fabs(y) / 0.8f;
+		target = fwd_ * (want * (y < 0 ? -0.5f : 1.0f));
+		if (std::fabs(y) < 0.15f)
+			target = V3{};
+	}
 	V3 flat = flatten(vel_, up_);
 	vel_ = flat + (target - flat) * std::min(1.0f, 7.0f * kDt);
 	vel_ += flatten(V3{0, -p[Gravity], 0}, up_) * kDt * 0.1f;

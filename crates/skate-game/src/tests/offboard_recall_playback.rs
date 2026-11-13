@@ -50,7 +50,7 @@ impl Replay {
         self.input.sample_raw_for_test(raw);
         let mut actions = self.input.player_actions();
         self.controls
-            .update_for_physics(&mut actions, &self.physics, &self.skater, &self.camera)
+            .update_for_physics(&mut actions, &self.physics, &self.skater, &self.camera, None)
             .unwrap();
         frame::advance(
             &mut self.physics,

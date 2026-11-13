@@ -588,7 +588,7 @@ fn raw_y_reaches_stock_dismount() {
         });
         let mut actions = input.player_actions();
         controls
-            .update_for_physics(&mut actions, &physics, &skater, &camera)
+            .update_for_physics(&mut actions, &physics, &skater, &camera, None)
             .unwrap();
         let published_slope = skater.player_input.physical.off_board.kind_88;
         let published_thin = skater.player_input.physical.off_board.flag_330 != 0;
