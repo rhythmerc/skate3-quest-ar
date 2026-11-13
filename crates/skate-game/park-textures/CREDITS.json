@@ -1,0 +1,23 @@
+[
+ {
+  "texture": "wood",
+  "source": "ambientCG Wood026",
+  "url": "https://ambientcg.com/a/Wood026",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication)",
+  "change": "colour map only, resized from 1024 to 512"
+ },
+ {
+  "texture": "brick",
+  "source": "ambientCG Bricks051",
+  "url": "https://ambientcg.com/a/Bricks051",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication)",
+  "change": "colour map only, resized from 1024 to 512"
+ },
+ {
+  "texture": "concrete",
+  "source": "ambientCG Concrete046",
+  "url": "https://ambientcg.com/a/Concrete046",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication)",
+  "change": "colour map only, resized from 1024 to 512"
+ }
+]

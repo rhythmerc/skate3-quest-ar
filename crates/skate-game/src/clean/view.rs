@@ -122,7 +122,7 @@ pub(crate) fn desktop_world(
     ));
     let mut rails = Vec::new();
     for (kind, size, at, turn) in PARK {
-        let piece = Piece { kind, size };
+        let piece = Piece::sized(kind, size);
         let geometry = piece.geometry();
         let t = Transform::from_translation(Vec3::from_array(at)).with_rotation(Quat::from_rotation_y(turn));
         for q in &geometry.quads {
@@ -386,10 +386,12 @@ pub(crate) fn views(
 /// rails (the headset's park builder keeps its own brighter set).
 fn desktop_color(kind: PieceKind) -> Color {
     match kind {
-        PieceKind::QuarterPipe | PieceKind::HalfPipe | PieceKind::Spine | PieceKind::Bank => Color::srgb(0.92, 0.66, 0.55),
+        PieceKind::QuarterPipe | PieceKind::HalfPipe | PieceKind::Spine | PieceKind::Bank | PieceKind::Bowl => {
+            Color::srgb(0.92, 0.66, 0.55)
+        }
         PieceKind::Kicker | PieceKind::FunBox | PieceKind::Platform | PieceKind::Stairs | PieceKind::Wall => {
             Color::srgb(0.76, 0.77, 0.8)
         }
-        PieceKind::Ledge | PieceKind::Rail => Color::srgb(0.9, 0.57, 0.48),
+        PieceKind::Ledge | PieceKind::Rail | PieceKind::CurvedRail => Color::srgb(0.9, 0.57, 0.48),
     }
 }

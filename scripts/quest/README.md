@@ -165,24 +165,30 @@ camera is off in the headset, so the game froze behind an invisible menu.
 Hold the left menu button for a second to enter or leave. The skater gets no
 input while building:
 
+A legend beside each controller says what its sticks and buttons do at that
+moment (menu > Build a park > Build hints turns it off). You are either
+**placing** the next piece or **editing** one you selected; the sticks never
+change a piece just because the pointer crossed it.
+
 | Touch | Build action |
 |---|---|
-| Left stick left/right | Choose a piece (wrist palette): kicker, quarter pipe, half pipe, rail, ledge, fun box, platform, bank, stairs + handrail, spine |
-| Left stick up/down | Grow / shrink the whole world (skater and pieces together); saved with the layout |
-| Left grip + left stick up/down | Grow / shrink only the park (every placed piece, 0.25-4x, about its own base); the skater keeps its size; saved with the layout |
-| Left stick click | Drop a starter park where the right controller points |
+| Left stick left/right | Choose the next piece (the wrist palette scrolls): kicker, bank, quarter pipe, half pipe, spine, bowl (sunk into the floor or table it is put on, which opens over it), rail, curved rail, ledge, fun box, platform, stairs + handrail, wall |
+| Left stick up/down | What it is made of: wood, concrete, brick, steel, or its plain colour (the choices stack above it in the palette) |
+| Right stick left/right / up-down | Turn it (smoothly, faster the further the stick is pushed) / make it bigger or smaller |
+| A or right trigger | Put it where the right controller points (on a placed piece too) |
+| Right stick click | Free placement: hold the piece in your hand instead of on a surface; again to go back |
+| Right grip on a placed piece | Select it. The sticks above then change that piece, and it is outlined |
+| Selected: hold right grip | Move it |
+| Selected: B / right stick click | Delete it / copy it (the copy becomes the next piece) |
+| Selected: A or right trigger | Done |
+| Hold left grip | The second set: left stick up/down its length or height, left/right its width (arrows on the piece show which it has), right stick its colour (click: back to its own), A hides a selected piece (still skated) |
 | Left trigger | Undo |
-| Right controller | Point; a ghost shows where the piece goes |
-| Right trigger | Drop it there |
-| Right stick left/right / up-down | Turn 15° (snaps to table edges) / resize (length or height); pointing at a placed piece, turns / resizes that piece |
-| Left grip + right stick up/down | Scale the whole piece (0.25-4x; the piece pointed at, or the next one dropped) |
-| Right stick click on a piece | Copy it (kind, size, scale, turn) |
-| Right grip on a piece | Pick it up, release to put it down |
-| B on a piece | Delete it |
-| A on a piece | Make it invisible (still skated; build mode shows it as a ghost) or visible again |
-| A on nothing | Show / hide every detected-surface layer (AR settings) |
+| Left stick click | Drop a starter park where the right controller points |
 | Y | Rescan the room (Space Setup) |
 | Hold X | Clear every piece |
+
+Pieces line up with table edges; beside another of its kind a piece sits flush
+against it, and a rail's end meets another rail's at any angle.
 
 ### Planes
 

@@ -113,4 +113,5 @@ through the `--trace` CLI option, including optional GPU pass diagnostics.
 
 GPL-3.0, the same as the upstream
 [Skate 3 Rust Engine](https://github.com/SK8-ENGINE/skate-3-rust-engine).
-Clean skate sounds are CC0 (credits in `crates/skate-game/clean-audio/CREDITS.json`).
+Clean skate sounds are CC0 (credits in `crates/skate-game/clean-audio/CREDITS.json`), and so are
+the park pieces' wood, concrete and brick textures (ambientCG; `crates/skate-game/park-textures/CREDITS.json`).

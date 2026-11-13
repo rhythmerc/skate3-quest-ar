@@ -54,7 +54,7 @@ impl UiProvider for Shared {
                 w.extend([
                     Widget::link("AR settings", AR),
                     Widget::link("Build a park", BUILD),
-                    Widget::button("recenter", "Put the skater in front of me"),
+                    Widget::button("recenter", "Place the skater: point, then A"),
                     Widget::link("Controls", CONTROLS),
                     #[cfg(feature = "retail")]
                     Widget::link("Skate 3 data", DATA),
@@ -138,7 +138,7 @@ impl UiProvider for Shared {
                 Outcome::Say("The skater is in front of you".into())
             }
             (_, "recenter") => {
-                put_skater_ahead(world);
+                world.resource_mut::<crate::xr::spawn::PlaceSkater>().0 = true;
                 Outcome::Close
             }
             (INTRO, "next") => Outcome::Replace(INTRO_MODE),
@@ -395,10 +395,11 @@ fn build_widgets(world: &World) -> Vec<Widget> {
             Widget::toggle("piece_hidden", "This piece invisible (still skated)", item.hidden),
             Widget::button("piece_delete", "Delete this piece"),
         ]),
-        None => w.push(Widget::info("Point at a piece in build mode to edit it here.")),
+        None => w.push(Widget::info("Select a piece in build mode (point at it, right grip) to edit it here.")),
     }
     w.extend([
         Widget::toggle("show_hidden", "Show invisible pieces while skating", placed.show_hidden),
+        Widget::toggle("build_hints", "Build hints: the controls beside the controllers", world.resource::<ArSettings>().build_hints),
         Widget::button("undo", "Undo"),
         Widget::button("clear", "Clear every piece"),
         Widget::info(format!("{} pieces", placed.items.len())),
@@ -450,6 +451,10 @@ fn build_act(widget: &str, act: Act, world: &mut World) -> Option<Outcome> {
             p.show_hidden = !p.show_hidden;
             Outcome::Stay
         }
+        "build_hints" => {
+            edit(world, |s| s.build_hints = !s.build_hints);
+            Outcome::Stay
+        }
         "undo" => {
             let undone = world.resource_mut::<PlacedPieces>().undo();
             Outcome::Say(if undone { "Undone".into() } else { "Nothing to undo".into() })
@@ -462,22 +467,23 @@ fn build_act(widget: &str, act: Act, world: &mut World) -> Option<Outcome> {
     })
 }
 
-const BUILD_HELP: [(&str, &str); 15] = [
+const BUILD_HELP: [(&str, &str); 16] = [
     ("Left menu (hold 1 s)", "enter / leave build mode"),
-    ("Left stick left/right", "choose a piece"),
-    ("Right controller", "point; A (or trigger) drops the piece"),
-    ("Right stick left/right", "turn (the piece pointed at)"),
-    ("Right stick up/down", "scale it (the whole piece)"),
-    ("Left stick up/down", "stretch its length / height"),
-    ("Left grip + A on a piece", "make it invisible (still skated)"),
-    ("Left grip + B", "show / hide the detected planes"),
-    ("Right grip on a piece", "pick it up"),
-    ("B on a piece", "delete it"),
-    ("Right stick click", "copy the piece pointed at"),
+    ("The legend", "beside each controller: what it does right now"),
+    ("Left stick left/right", "choose the next piece"),
+    ("Left stick up/down", "what it's made of: wood, concrete, brick..."),
+    ("Right stick", "turn it / make it bigger or smaller"),
+    ("A or trigger", "put it where you point (pieces stack)"),
+    ("Right stick click", "hold it in your hand instead (free placement)"),
+    ("Right grip on a piece", "select it: the sticks then change that piece"),
+    ("Selected: hold right grip", "move it"),
+    ("Selected: B / right stick click", "delete it / copy it"),
+    ("Selected: A or trigger", "done"),
+    ("Hold left grip", "second set: length, width, colour, hide"),
     ("Left trigger", "undo"),
     ("Left stick click", "drop a starter park"),
-    ("Y", "rescan the room"),
-    ("Hold X", "clear every piece"),
+    ("Y / hold X", "rescan the room / clear every piece"),
+    ("Pieces line up", "with table edges and with each other"),
 ];
 
 // ---------------------------------------------------------------- data

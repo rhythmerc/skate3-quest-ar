@@ -75,6 +75,9 @@ pub(crate) struct ArSettings {
     /// The room light's brightness against passthrough's (1: as estimated).
     #[serde(default = "one")]
     pub room_light_strength: f32,
+    /// Build mode's legend beside the controllers (`xr::build::legend`).
+    #[serde(default = "yes")]
+    pub build_hints: bool,
     #[serde(skip)]
     pub revision: u64,
 }
@@ -92,6 +95,7 @@ impl Default for ArSettings {
             hud: true,
             room_light: false,
             room_light_strength: 1.0,
+            build_hints: true,
             revision: 0,
         }
     }

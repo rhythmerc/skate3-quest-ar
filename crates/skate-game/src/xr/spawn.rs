@@ -2,6 +2,10 @@
 //! point the left controller at a surface (real or course); a ray and target
 //! ring show where. Release to spawn there, facing the pointing direction.
 //! The pad is neutral while aiming so the squeeze doesn't also grab/bump.
+//!
+//! The menu's "Place the skater" is the same with the right controller and
+//! no chord to know ([`PlaceSkater`]): point, and A or the trigger puts the
+//! skater there; B leaves it where it was.
 use super::actions::{Hand, LatestTouch};
 use super::rig::Rig;
 use super::link::{ArWorld, TeleportSkater};
@@ -17,6 +21,11 @@ const MISS_LENGTH: f32 = 40.0;
 /// Only ground-like faces are spawn targets, not walls.
 const MIN_UP: f32 = 0.6;
 const SPAWN_LIFT: f32 = 0.05;
+
+/// The player asked (from the menu) to place the skater: the right
+/// controller aims until a spot is confirmed or the request is called off.
+#[derive(Resource, Default)]
+pub(crate) struct PlaceSkater(pub bool);
 
 #[derive(Resource, Default)]
 struct Aim {
@@ -35,6 +44,7 @@ pub(crate) struct SpawnPlugin;
 impl Plugin for SpawnPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Aim>()
+            .init_resource::<PlaceSkater>()
             .add_systems(Startup, spawn_visuals)
             .add_systems(
                 PreUpdate,
@@ -86,8 +96,43 @@ fn aim_and_spawn(
     mut teleport: MessageWriter<TeleportSkater>,
     mut pad: ResMut<ExternalPad>,
     mut aim: ResMut<Aim>,
+    mut place: ResMut<PlaceSkater>,
+    panel: Res<super::panel::XrPanel>,
+    mut was: Local<(bool, bool)>,
 ) {
     let touch = &touch.0;
+    if build.active {
+        place.0 = false;
+    }
+    // Asked for from the menu: the right controller aims, A or its trigger
+    // confirms (once let go of since the menu's own press), B calls it off.
+    if place.0 && !panel.visible {
+        let confirm = touch.a || touch.right_trigger >= SQUEEZE;
+        let (confirmed, cancelled) = (confirm && !was.0, touch.b && !was.1);
+        *was = (confirm, touch.b);
+        pad.set(XboxState { buttons: 0, triggers: [0, 0], left: [0, 0], right: [0, 0] });
+        let aimed = rig.root_transform().zip(hands.iter().find(|(hand, _)| matches!(hand, Hand::Right))).map(|(root, (_, controller))| {
+            let origin = root.transform_point(controller.translation);
+            let direction = (root.rotation * (controller.rotation * Vec3::NEG_Z)).normalize();
+            (origin, direction, raycast(&world, origin, direction))
+        });
+        aim.target = None;
+        aim.ray = aimed.map(|(origin, direction, hit)| match hit {
+            Some(point) => (origin, point, true),
+            None => (origin, origin + direction * MISS_LENGTH, false),
+        });
+        if cancelled {
+            place.0 = false;
+            aim.ray = None;
+        } else if let (true, Some((_, direction, Some(point)))) = (confirmed, aimed) {
+            info!("XR spawn at {point:?} (placed from the menu)");
+            teleport.write(TeleportSkater { point, forward: direction });
+            place.0 = false;
+            aim.ray = None;
+        }
+        return;
+    }
+    *was = (true, true);
     let held = touch.left_grip >= SQUEEZE && touch.left_trigger >= SQUEEZE && !build.active;
     if !held {
         aim.ray = None;

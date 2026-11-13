@@ -34,7 +34,7 @@ const TAP_SECONDS: f32 = 0.35;
 const STICK: f32 = 0.6;
 const REPEAT_DELAY: f32 = 0.35;
 const REPEAT_EVERY: f32 = 0.09;
-const UI_FONT: &str = "embedded://skate_game/clean/assets/fonts/Montserrat-Italic.ttf";
+pub(crate) const UI_FONT: &str = "embedded://skate_game/clean/assets/fonts/Montserrat-Italic.ttf";
 
 pub(crate) type PageId = &'static str;
 
@@ -157,7 +157,7 @@ pub(crate) struct XrUi {
     pub external: Option<&'static str>,
     /// Open on this page next frame (other systems' requests).
     pub request: Option<PageId>,
-    /// Put the skater in front of the player next frame.
+    /// Start placing the skater (`xr::spawn::PlaceSkater`) next frame.
     pub request_recenter: bool,
     drag: Option<usize>,
     view: View,
@@ -393,7 +393,7 @@ fn frame(world: &mut World) {
         }
     }
     if std::mem::take(&mut world.resource_mut::<XrUi>().request_recenter) {
-        pages::put_skater_ahead(world);
+        world.resource_mut::<crate::xr::spawn::PlaceSkater>().0 = true;
     }
     {
         let mut ui = world.resource_mut::<XrUi>();

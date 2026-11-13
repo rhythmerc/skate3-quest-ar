@@ -329,7 +329,7 @@ fn info_row(text: impl Into<String>) -> Row {
     Row { text: text.into(), dim: true }
 }
 
-const START: [&str; 6] = ["Skate", "Build a park", "How to play", "SK8 menu", "Put the skater in front of me", "Close"];
+const START: [&str; 6] = ["Skate", "Build a park", "How to play", "SK8 menu", "Place the skater: point, then A", "Close"];
 
 const HOWTO_TITLES: [&str; 4] = ["Skating", "Tricks", "Building a park", "SK8 menu"];
 
@@ -406,19 +406,21 @@ fn howto_rows(page: usize, xr: bool) -> Vec<Row> {
             rows
         }
         2 => vec![
-            pair("Left stick left/right", "choose a piece"),
-            pair("Right controller", "point; A (or trigger) drops the piece"),
-            pair("Right stick", "turn / scale the whole piece (or the one pointed at)"),
-            pair("Right grip on a piece", "pick it up"),
-            pair("B on a piece", "delete it"),
-            pair("Right stick click", "copy the piece pointed at"),
+            pair("The legend", "beside each controller: what it does right now"),
+            pair("Left stick left/right", "choose the next piece"),
+            pair("Left stick up/down", "what it's made of: wood, concrete, brick..."),
+            pair("Right stick", "turn it / make it bigger or smaller"),
+            pair("A or trigger", "put it where you point (pieces stack)"),
+            pair("Right stick click", "hold it in your hand instead (free placement)"),
+            pair("Right grip on a piece", "select it: the sticks then change that piece"),
+            pair("Selected: hold right grip", "move it"),
+            pair("Selected: B / right stick click", "delete it / copy it"),
+            pair("Selected: A or trigger", "done"),
+            pair("Hold left grip", "second set: length, width, colour, hide"),
             pair("Left trigger", "undo"),
             pair("Left stick click", "drop a starter park"),
-            pair("Left stick up/down", "stretch its length / height"),
-                        pair("Left grip + B", "show the detected planes"),
-            pair("Y", "rescan the room"),
-            pair("Hold X", "clear every piece"),
-            pair("Hold left menu 1 s", "leave build mode"),
+            pair("Y / hold X", "rescan the room / clear every piece"),
+            pair("Pieces line up", "with table edges and with each other"),
         ],
         _ => vec![
             pair("Open", if xr { "hold left menu + squeeze both grips" } else { "Tab" }),
@@ -514,7 +516,7 @@ fn sk8_rows(menu: &Menu, sim: &CleanSkate) -> Vec<Row> {
                 vec![
                     row(format!("Park size (pieces only) {:>12.2}x", menu.park_scale)),
                     row(format!("World scale (game m per real m) {:>6.1}", menu.world_scale)),
-                    row("Put the skater in front of me"),
+                    row("Place the skater: point, then A"),
                 ]
             } else {
                 vec![info_row("World scale and park size apply in the headset.")]
@@ -572,7 +574,7 @@ fn page_rows(menu: &Menu, sim: &CleanSkate) -> Vec<Row> {
         Page::Start => {
             let mut rows: Vec<Row> = START
                 .iter()
-                .filter(|item| menu.xr || !matches!(**item, "Build a park" | "Put the skater in front of me"))
+                .filter(|item| menu.xr || !matches!(**item, "Build a park" | "Place the skater: point, then A"))
                 .map(|s| row(*s))
                 .collect();
             #[cfg(feature = "retail")]
@@ -642,7 +644,7 @@ fn select(menu: &mut Menu, sim: &mut CleanSkate, alt: bool) {
                     menu.page = Page::Sk8;
                     menu.cursor = 0;
                 }
-                "Put the skater in front of me" => {
+                "Place the skater: point, then A" => {
                     menu.xr_requests.recenter = true;
                     menu.open = false;
                 }

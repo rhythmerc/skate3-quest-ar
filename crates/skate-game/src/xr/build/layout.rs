@@ -90,11 +90,13 @@ mod tests {
             version: VERSION,
             pieces: vec![Placed {
                 id: 3,
-                piece: Piece { kind: PieceKind::Rail, size: 1.5 },
+                piece: Piece::sized(PieceKind::Rail, 1.5),
                 position: [0.4, 0.75, -1.2],
                 yaw: 0.5,
                 scale: 1.75,
                 hidden: true,
+                finish: Some(crate::xr::build::pieces::Finish::Brick),
+                tint: Some(crate::xr::build::pieces::Tint { hue: 9, light: 2 }),
             }],
             scale: Some(8.0),
             park_scale: Some(1.5),
@@ -112,5 +114,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!((old.pieces[0].scale, old.pieces[0].hidden), (1.0, false), "pieces from before 0.0.3 load");
+        assert_eq!(old.pieces[0].finish, None, "and take their kind's own finish");
     }
 }
