@@ -213,11 +213,9 @@ copings), powerslides, pops, flips, catches, landings, pushes, footsteps and
 bails. Every sound is spatial: the headset is the listener and the skater
 the source, with distance measured in real metres (full volume within 1 m,
 a quarter at 2 m), so it pans and fades as the skater rides around the room at
-any world scale (`xr/spatial_audio.rs`). 22 are CC0 recordings from freesound.org (credits in
-`clean-audio/CREDITS.json`: nolimitkid, Sheyvan, mbezzola, BlackNeon1234,
-visionear, neotronable, PHetish, Bruno_Garcez, C-V, bspiller5,
-jarrondesnudo, gerardcatala); the other 9 (flips, footsteps, the chime and
-the metal roll) are original synthesis from `scripts/cleanroom/synth_sounds.py`.
+any world scale (`xr/spatial_audio.rs`). All 31 are original synthesis from
+`scripts/cleanroom/synth_sounds.py` (noise and decaying sines shaped like the thing that makes the
+sound; no recording is in them).
 In the imported-disc tier, `SKATE_AUDIO=retail` switches to the retail
 player-audio runtime.
 

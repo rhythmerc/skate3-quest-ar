@@ -2,9 +2,8 @@
 //!
 //! The retail-exact player audio (`player_audio.rs`) needs the decoded retail banks, grains and
 //! the recovered authored graph. On the Quest that chain is fragile, so the AR build plays the
-//! skate3-cleanroom web build's 31 sounds instead: real CC0 skateboard recordings plus a few
-//! resynthesised ones (`clean-audio/`, extracted by `tools/extract_clean_audio.py`, credits in
-//! `clean-audio/CREDITS.json`). They are compiled into the binary, so nothing has to be pushed
+//! clean tier's own 31 sounds instead, all synthesised (`clean-audio/`, made by
+//! `scripts/cleanroom/synth_sounds.py` from noise and decaying sines: no recording is in them). They are compiled into the binary, so nothing has to be pushed
 //! to the headset.
 //!
 //! The driver reads the same `PlayerAudioObservation` the retail worker does:
@@ -53,8 +52,8 @@ const WAVS: &[(&str, &[u8])] = clean_wavs!(
     "roll_smooth", "roll_wood",
 );
 
-/// Overall level; the CC0 files are normalised per category (hits peak near -4 dBFS, loops sit
-/// around -24 dBFS RMS).
+/// Overall level; the files are mastered per category (hits peak near -4 dBFS, loops sit at
+/// -24 dBFS RMS).
 const MASTER: f32 = 1.5;
 /// Loops are mastered quiet so they sit under the hits; this restores them.
 const LOOP_GAIN: f32 = 2.6;
@@ -64,17 +63,13 @@ const FADE_S: f32 = 0.06;
 const ROLL_MIN_SPEED: f32 = 0.25;
 /// Board speed at which rolling is at full volume, m/s.
 const ROLL_FULL_SPEED: f32 = 7.0;
-/// The powerslide's scrape at full speed, against a rolling loop's full level. The recording is
-/// a harsh one, and both engines call a hard turn at walking pace a powerslide: at the level of
-/// the wheels (and never under 40% of it, as it was) every slow turn screeched.
-const SLIDE_GAIN: f32 = 0.35;
+/// The powerslide's scrape at full speed, against a rolling loop's full level. Both engines call
+/// a hard turn at walking pace a powerslide: at the level of the wheels (and never under 40% of
+/// it, as it was) every slow turn screeched.
+const SLIDE_GAIN: f32 = 0.5;
 /// Board speed under which a powerslide is silent, and at which its scrape is full, m/s.
 const SLIDE_MIN_SPEED: f32 = 1.5;
 const SLIDE_FULL_SPEED: f32 = 7.0;
-/// The scrape is played with what is above this taken out of it (its squeal), Hz.
-const SLIDE_LOWPASS_HZ: f32 = 2500.0;
-/// Rolling on a wooden ramp: the smooth loop at this pitch (a hollower, lower rumble).
-const WOOD_PITCH: f32 = 0.82;
 /// How close to a hinted rail the skater must be for a metal grind, metres.
 const METAL_RAIL_DISTANCE_M: f32 = 0.6;
 /// Delay from a flip's start to its catch, seconds.
@@ -321,10 +316,7 @@ fn observe_sk8(
         let kind = if hints.near_metal(position) { Loop::GrindMetal } else { Loop::GrindConcrete };
         audio.set(kind, (0.35 + 0.65 * level).min(1.0), 0.9 + 0.2 * (speed / 8.0).min(1.0));
     } else if sounds.grounded {
-        // On a wooden ramp the wheels sound lower, not different: the wood recording
-        // (`roll_wood`) is a creaking board, a steady squeak under every roll.
-        let kind = Loop::RollSmooth;
-        let pitch = if hints.on_wood(position) { pitch * WOOD_PITCH } else { pitch };
+        let kind = if hints.on_wood(position) { Loop::RollWood } else { Loop::RollSmooth };
         if sounds.powersliding {
             audio.set(kind, level * 0.5, pitch);
             let (volume, pitch) = slide(speed);
@@ -391,10 +383,6 @@ fn setup(
             error!("SKATE_CLEAN_AUDIO {name}.wav is not 16-bit PCM");
             return None;
         };
-        let mut samples = samples;
-        if name == Loop::Powerslide.file() {
-            lowpass_loop(&mut samples, channels as usize, rate as f32, SLIDE_LOWPASS_HZ);
-        }
         Some(assets.add(StreamPcm::from_i16(Arc::new(samples), channels, rate, looping)))
     };
     let mut loops = Vec::new();
@@ -505,24 +493,6 @@ impl CleanAudio {
 fn slide(speed: f32) -> (f32, f32) {
     let level = ((speed - SLIDE_MIN_SPEED) / (SLIDE_FULL_SPEED - SLIDE_MIN_SPEED)).clamp(0.0, 1.0);
     (SLIDE_GAIN * level, 0.8 + 0.15 * level)
-}
-
-/// Takes what is above `cutoff` out of a looping sound (two one-pole filters, 12 dB an octave),
-/// run round the loop twice so its end still meets its start.
-fn lowpass_loop(samples: &mut [i16], channels: usize, rate: f32, cutoff: f32) {
-    let k = 1.0 - (-std::f32::consts::TAU * cutoff / rate).exp();
-    for channel in 0..channels.max(1) {
-        let (mut a, mut b) = (0.0f32, 0.0f32);
-        for pass in 0..2 {
-            for sample in samples.iter_mut().skip(channel).step_by(channels.max(1)) {
-                a += k * (*sample as f32 - a);
-                b += k * (a - b);
-                if pass == 1 {
-                    *sample = b.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(feature = "retail")]
@@ -637,10 +607,7 @@ fn observe(
         // All AR real surfaces share one physics material, so the wheel material says nothing
         // there: placed ramps are wood, everything else rolls like smooth concrete. The rough and
         // metal loops are loaded for maps whose materials get mapped later.
-        // On a wooden ramp the wheels sound lower, not different: the wood recording
-        // (`roll_wood`) is a creaking board, a steady squeak under every roll.
-        let kind = Loop::RollSmooth;
-        let pitch = if hints.on_wood(position) { pitch * WOOD_PITCH } else { pitch };
+        let kind = if hints.on_wood(position) { Loop::RollWood } else { Loop::RollSmooth };
         let surface = obs.wheel_surface & 0x7F;
         if audio.seen_surfaces & (1u128 << surface) == 0 {
             audio.seen_surfaces |= 1u128 << surface;
@@ -713,27 +680,10 @@ mod tests {
     }
 
     #[test]
-    fn the_powerslide_loses_its_squeal_and_still_loops() {
-        let (_, bytes) = WAVS.iter().find(|(n, _)| *n == "powerslide").unwrap();
-        let (original, channels, rate) = parse_wav(bytes).unwrap();
-        let mut soft = original.clone();
-        lowpass_loop(&mut soft, channels as usize, rate as f32, SLIDE_LOWPASS_HZ);
-        // The energy of the sample-to-sample changes is the top of the spectrum.
-        let harsh = |s: &[i16]| s.windows(2).map(|w| (w[1] as f64 - w[0] as f64).powi(2)).sum::<f64>();
-        let level = |s: &[i16]| s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>();
-        assert!(harsh(&soft) < 0.25 * harsh(&original), "{} of {}", harsh(&soft), harsh(&original));
-        assert!(level(&soft) > 0.3 * level(&original), "the body of the sound is kept");
-        // The seam is no bigger a step than the loop's own.
-        let seam = (soft[0] as f64 - soft[soft.len() - 1] as f64).abs();
-        let biggest = soft.windows(2).map(|w| (w[1] as f64 - w[0] as f64).abs()).fold(0.0, f64::max);
-        assert!(seam <= biggest, "{seam} > {biggest}");
-    }
-
-    #[test]
     fn every_clean_sound_parses() {
         for (name, bytes) in WAVS {
             let (samples, channels, rate) = parse_wav(bytes).unwrap_or_else(|| panic!("{name}"));
-            assert_eq!((channels, rate), (1, 32_000), "{name}");
+            assert_eq!((channels, rate), (1, 48_000), "{name}");
             assert!(samples.len() > 1000, "{name}");
         }
     }
