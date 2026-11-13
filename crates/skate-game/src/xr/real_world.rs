@@ -35,6 +35,8 @@ const MAX_DOWN_COS: f32 = -0.7;
 const MIN_DOUBLE_AREA_M2: f32 = 1e-6;
 /// A sunk piece opens the level faces within this of its rim's height, m.
 const HOLE_REACH_M: f32 = 0.08;
+/// A sunk piece this near its surface's height is on it, m.
+const SEATED_M: f32 = 0.002;
 
 pub(crate) struct RealWorldPlugin;
 
@@ -49,7 +51,7 @@ fn rebuild_collision(
     shapes: Res<SceneShapes>,
     room: Res<RoomMesh>,
     revision: Res<SceneRevision>,
-    placed: Res<PlacedPieces>,
+    mut placed: ResMut<PlacedPieces>,
     mesh_planes: Res<MeshPlanes>,
     link: Res<SkaterLink>,
     settings: Res<ArSettings>,
@@ -81,6 +83,34 @@ fn rebuild_collision(
         .filter(|_| settings.mesh.collide)
         .map(|mesh| mesh_triangles(mesh, &all_shapes))
         .unwrap_or_default();
+    // A bowl's rim belongs level with the surface it is sunk into. Left a
+    // little over it (the room's floor is not found at quite the same
+    // height in every session), the surface would be opened under a rim
+    // with nothing to ride up onto it: the skater would roll under the rim
+    // and fall through. So it is put back down first.
+    let seats: Vec<(usize, f32)> = placed
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.piece.kind.sunk())
+        .filter_map(|(index, item)| {
+            let (min, max) = item.geometry().footprint();
+            let k = placed.park_scale * item.scale / root.scale.x;
+            let (centre, turn) = (Vec3::from_array(item.position), Quat::from_rotation_y(item.yaw));
+            let mut points = vec![centre];
+            points.extend([(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)].map(|(x, z)| centre + turn * Vec3::new(x * k, 0.0, z * k)));
+            seat(&points, &quads, HOLE_REACH_M).filter(|y| (y - item.position[1]).abs() > SEATED_M).map(|y| (index, y))
+        })
+        .collect();
+    if !seats.is_empty() {
+        let placed = &mut *placed;
+        for (index, y) in seats {
+            info!("AR collision: piece {} seated on its surface ({:.3} m to {:.3} m)", placed.items[index].id, placed.items[index].position[1], y);
+            placed.items[index].position[1] = y;
+        }
+        placed.revision += 1;
+        *built = Some((anchor, revision.0, placed.revision, settings.revision));
+    }
     let to_world = |p: Vec3| root.transform_point(p);
     let (quad_count, triangle_count) = (quads.len(), triangles.len());
     let room_quads: Vec<[Vec3; 4]> = quads.into_iter().map(|q| q.map(to_world)).collect();
@@ -167,6 +197,29 @@ fn rebuild_collision(
         settings.mesh.collide,
         started.elapsed().as_secs_f32() * 1000.0
     );
+}
+
+/// The height a sunk piece's rim belongs at: the lowest of the level faces
+/// under `points` (its centre and corners, at its rim's height) that it
+/// would open, i.e. within `reach` of that height. None: over no such face.
+pub(crate) fn seat(points: &[Vec3], faces: &[[Vec3; 4]], reach: f32) -> Option<f32> {
+    faces
+        .iter()
+        .filter(|q| {
+            let normal = (q[1] - q[0]).cross(q[3] - q[0]).normalize_or_zero();
+            normal.y.abs() >= UPWARD_MIN_COS
+        })
+        .filter(|q| {
+            points.iter().any(|p| {
+                (p.y - q[0].y).abs() <= reach && {
+                    let side = |a: Vec3, b: Vec3| (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
+                    let sides = [side(q[0], q[1]), side(q[1], q[2]), side(q[2], q[3]), side(q[3], q[0])];
+                    sides.iter().all(|s| *s >= 0.0) || sides.iter().all(|s| *s <= 0.0)
+                }
+            })
+        })
+        .map(|q| q[0].y)
+        .min_by(f32::total_cmp)
 }
 
 /// The room's faces with the level ones opened over each of `holes` (a
@@ -498,5 +551,23 @@ mod tests {
         assert_eq!(quads.len(), 2);
         assert_eq!(edges.len(), 4);
         assert!(normal(quads[0]).dot(Vec3::Y) > 0.99);
+    }
+
+    #[test]
+    fn a_sunk_piece_is_seated_on_the_lowest_surface_it_opens() {
+        let floor = quad(Vec3::ZERO, Vec3::X * 3.0, Vec3::Z * 3.0);
+        let rug = quad(Vec3::new(1.0, 0.03, 0.0), Vec3::X * 0.5, Vec3::Z * 0.5);
+        let table = quad(Vec3::new(0.0, 0.75, 0.0), Vec3::X * 0.6, Vec3::Z * 0.4);
+        let wall = quad(Vec3::new(0.0, 1.0, -2.0), Vec3::X * 2.0, Vec3::Y * 1.0);
+        let faces = [floor, rug, table, wall];
+        let at = |c: Vec3| [c, c + Vec3::new(-0.3, 0.0, -0.3), c + Vec3::new(0.3, 0.0, -0.3), c + Vec3::new(0.3, 0.0, 0.3), c + Vec3::new(-0.3, 0.0, 0.3)];
+        // Left 3 cm over the floor (the floor found lower in a later session): down onto it.
+        assert_eq!(seat(&at(Vec3::new(-1.5, 0.031, 1.5)), &faces, HOLE_REACH_M), Some(0.0));
+        // Half on a rug: the floor, the lower of the two it opens.
+        assert_eq!(seat(&at(Vec3::new(0.6, 0.03, 0.0)), &faces, HOLE_REACH_M), Some(0.0));
+        // In the table top: the table, not the floor far under it.
+        assert_eq!(seat(&at(Vec3::new(0.0, 0.76, 0.0)), &faces, HOLE_REACH_M), Some(0.75));
+        // Over nothing level: left where it is.
+        assert_eq!(seat(&at(Vec3::new(0.0, 1.5, 0.0)), &faces, HOLE_REACH_M), None);
     }
 }

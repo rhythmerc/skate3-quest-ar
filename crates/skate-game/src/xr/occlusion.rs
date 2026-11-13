@@ -4,11 +4,18 @@
 //! eye view takes out the pixels whose place in the room is behind what is
 //! really there (`occlusion.wgsl`).
 //!
-//! Off unless the AR settings turn it on (it costs GPU time, and the depth
-//! provider runs only while it is on): hard (a pixel is hidden or not) or
-//! soft (edges fade, nine depth samples a pixel instead of one). Only solid
-//! things are hidden: the menu, the build legend and other see-through
-//! draws write no depth and stay in front of everything.
+//! Off unless the AR settings turn it on (the pass costs GPU time). Edges
+//! fade, over nine depth samples a pixel. Only solid things are hidden: the
+//! menu, the build legend and other see-through draws write no depth and
+//! stay in front of everything.
+//!
+//! A bowl is under the real surface it is sunk into, which would hide all
+//! of it: what is drawn below a bowl's mouth is instead hidden only by what
+//! is really in front of the mouth (`Wanted::holes`).
+//!
+//! The depth provider is started the first time the setting is on and then
+//! left running until the app closes: stopped and started again, the
+//! headset's images came back wrong.
 use super::ar_settings::ArSettings;
 use super::rig::Rig;
 use bevy::core_pipeline::FullscreenShader;
@@ -43,26 +50,23 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Occlusion {
     #[default]
     Off,
-    /// Edges fade.
+    /// (Settings from when there was also a "hard" read as on.)
+    #[serde(alias = "Hard")]
     Soft,
-    /// A pixel is hidden or it isn't: the cheapest.
-    Hard,
 }
 
 impl Occlusion {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Off => Self::Soft,
-            Self::Soft => Self::Hard,
-            Self::Hard => Self::Off,
+            Self::Soft => Self::Off,
         }
     }
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::Soft => "soft",
-            Self::Hard => "hard",
+            Self::Soft => "on",
         }
     }
 }
@@ -73,7 +77,16 @@ impl Occlusion {
 struct Wanted {
     mode: Occlusion,
     world_from_tracking: Mat4,
+    /// The mouths of the sunk pieces (bowls) nearest the head: the centre,
+    /// in the game world, and the radius about it.
+    holes: [Vec4; HOLES],
+    hole_count: u32,
 }
+
+/// How many bowls' mouths the pass knows of.
+const HOLES: usize = 4;
+/// What is this far under a mouth's height is in the bowl, m.
+const BELOW_M: f32 = 0.01;
 
 /// Why occlusion can't run here, for the settings page (none: it can, or
 /// it hasn't been tried).
@@ -114,10 +127,35 @@ pub(crate) fn enable(exts: &mut openxr::ExtensionSet) {
     exts.meta_environment_depth = true;
 }
 
-fn want(settings: Res<ArSettings>, rig: Res<Rig>, mut wanted: ResMut<Wanted>) {
+fn want(
+    settings: Res<ArSettings>,
+    rig: Res<Rig>,
+    placed: Res<super::build::PlacedPieces>,
+    heads: Query<&GlobalTransform, With<XrCamera>>,
+    mut wanted: ResMut<Wanted>,
+) {
     let root = rig.root_transform();
     wanted.mode = if root.is_some() { settings.occlusion } else { Occlusion::Off };
     wanted.world_from_tracking = root.map_or(Mat4::IDENTITY, |r| r.to_matrix());
+    wanted.hole_count = 0;
+    let (Some(root), true) = (root, wanted.mode != Occlusion::Off) else { return };
+    let head = heads.iter().next().map_or(root.translation, |t| t.translation());
+    let mut holes: Vec<Vec4> = placed
+        .items
+        .iter()
+        .filter(|item| item.piece.kind.sunk())
+        .map(|item| {
+            let at = item.world_transform(&root, placed.park_scale);
+            let (min, max) = item.geometry().footprint();
+            let centre = at.transform_point(Vec3::new((min.x + max.x) * 0.5, 0.0, (min.y + max.y) * 0.5));
+            centre.extend((max - min).length() * 0.5 * at.scale.x)
+        })
+        .collect();
+    holes.sort_by(|a, b| a.truncate().distance_squared(head).total_cmp(&b.truncate().distance_squared(head)));
+    for (slot, hole) in wanted.holes.iter_mut().zip(&holes) {
+        *slot = *hole;
+    }
+    wanted.hole_count = holes.len().min(HOLES) as u32;
 }
 
 /// The pass reads the eye views' depth: their depth textures must allow it,
@@ -165,8 +203,11 @@ struct Eye {
     tangents: Vec4,
     near: f32,
     far: f32,
-    mode: u32,
     layer: u32,
+    hole_count: u32,
+    /// [`BELOW_M`] in the game world's units.
+    below: f32,
+    holes: [Vec4; HOLES],
 }
 
 fn ok(result: sys::Result, what: &'static str) -> Result<(), &'static str> {
@@ -257,8 +298,8 @@ fn make(session: &OxrSession, device: &RenderDevice) -> Result<Made, &'static st
     }
 }
 
-/// Starts and stops the provider with the setting, and takes the latest
-/// depth image for this frame.
+/// Starts the provider the first time the setting is on, and takes the
+/// latest depth image for each frame it is.
 fn acquire(
     wanted: Option<Res<Wanted>>,
     session: Res<OxrSession>,
@@ -281,13 +322,19 @@ fn acquire(
     }
     let Some(fns) = session.instance().exts().meta_environment_depth else { return };
     let Some(provider) = depth.made.as_ref().map(|m| m.provider) else { return };
-    if on != depth.running {
-        let result = unsafe { if on { (fns.start_environment_depth_provider)(provider) } else { (fns.stop_environment_depth_provider)(provider) } };
-        info!("Occlusion: depth sensing {} ({:?})", if on { "started" } else { "stopped" }, result);
-        depth.running = on && result.into_raw() >= 0;
-        depth.latest = None;
-        if !on {
-            depth.logged = false;
+    if !on {
+        return;
+    }
+    if !depth.running {
+        let result = unsafe { (fns.start_environment_depth_provider)(provider) };
+        info!("Occlusion: depth sensing started ({result:?})");
+        depth.running = result.into_raw() >= 0;
+        if !depth.running {
+            if !depth.failed {
+                *problem.0.lock().unwrap() = Some("The headset wouldn't start depth sensing.");
+            }
+            depth.failed = true;
+            return;
         }
     }
     let (true, Some(frame), Some(space)) = (depth.running, frame, space) else { return };
@@ -424,8 +471,10 @@ fn prepare(
             tangents,
             near: latest.near,
             far: if latest.far.is_finite() { latest.far } else { 0.0 },
-            mode: if wanted.mode == Occlusion::Soft { 2 } else { 1 },
             layer: layer as u32,
+            hole_count: wanted.hole_count,
+            below: BELOW_M * wanted.world_from_tracking.x_axis.truncate().length(),
+            holes: wanted.holes,
         };
         let buffer = depth.eyes[layer].get_or_insert_with(UniformBuffer::default);
         buffer.set(eye);
@@ -492,10 +541,12 @@ mod tests {
 
     #[test]
     fn the_setting_goes_round_and_reads_old_files() {
-        assert_eq!(Occlusion::Off.next().next().next(), Occlusion::Off);
+        assert_eq!(Occlusion::Off.next().next(), Occlusion::Off);
         assert_eq!(Occlusion::default(), Occlusion::Off);
-        let s: Occlusion = serde_json::from_str("\"Soft\"").unwrap();
-        assert_eq!((s, s.name()), (Occlusion::Soft, "soft"));
+        for old in ["\"Soft\"", "\"Hard\""] {
+            let s: Occlusion = serde_json::from_str(old).unwrap();
+            assert_eq!((s, s.name()), (Occlusion::Soft, "on"));
+        }
     }
 
     /// The pass's shader is valid WGSL, with and without MSAA. (A shader
@@ -505,7 +556,7 @@ mod tests {
         let source = include_str!("occlusion.wgsl");
         for multisampled in [false, true] {
             // What Bevy's preprocessor would do: the import, and the #ifdef.
-            let mut text = String::from("struct View { world_from_clip: mat4x4<f32>, viewport: vec4<f32> }\n");
+            let mut text = String::from("struct View { world_from_clip: mat4x4<f32>, viewport: vec4<f32>, world_position: vec3<f32> }\n");
             let mut keep = true;
             for line in source.lines() {
                 match line.trim() {

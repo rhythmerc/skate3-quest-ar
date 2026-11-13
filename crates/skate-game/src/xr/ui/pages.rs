@@ -284,7 +284,7 @@ fn ar_widgets(world: &World) -> Vec<Widget> {
     match (s.occlusion, *world.resource::<crate::xr::occlusion::OcclusionProblem>().0.lock().unwrap()) {
         (crate::xr::occlusion::Occlusion::Off, _) => {}
         (_, Some(problem)) => w.push(Widget::info(problem)),
-        _ => w.push(Widget::info("Uses the headset's depth sensing: soft looks best, hard costs less.")),
+        _ => w.push(Widget::info("Uses the headset's depth sensing.")),
     }
     w.extend([
         Widget::toggle("hud", "Trick and points readout", s.hud),
