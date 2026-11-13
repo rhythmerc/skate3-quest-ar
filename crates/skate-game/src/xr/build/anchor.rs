@@ -132,9 +132,16 @@ fn ask(
     frame: Option<Res<OxrFrameState>>,
     placed: Res<PlacedPieces>,
     time: Res<Time<Real>>,
+    mut scene: ResMut<crate::xr::planes::SceneQuery>,
     mut anchor: ResMut<ParkAnchor>,
 ) {
+    // One query at a time with the headset: the room's wait while the
+    // anchor is looked for, and the anchor's until the room has been read.
+    scene.bypass_change_detection().hold(matches!(anchor.step, Step::Finding(_)));
     if anchor.step != Step::Idle || anchor.space.is_some() {
+        return;
+    }
+    if !scene.settled() {
         return;
     }
     if anchor.wait > 0.0 {

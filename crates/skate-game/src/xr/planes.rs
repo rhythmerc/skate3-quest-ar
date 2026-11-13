@@ -117,7 +117,7 @@ impl SceneCapture {
 }
 
 #[derive(Resource, Default)]
-struct SceneQuery {
+pub(crate) struct SceneQuery {
     pending: Option<sys::AsyncRequestIdFB>,
     surfaces: Vec<SceneSurface>,
     since_attempt: Option<f32>,
@@ -130,6 +130,23 @@ struct SceneQuery {
     since_refresh: f32,
     /// A refresh replaced `surfaces`; `locate_surfaces` bumps the revision.
     changed: bool,
+    /// Not to query for now ([`Self::hold`]).
+    held: bool,
+}
+
+impl SceneQuery {
+    /// The room has been read and no query is with the headset: another
+    /// may be made. (Two at once, and the headset answered the room's with
+    /// nothing, which looked like a room never scanned.)
+    pub(crate) fn settled(&self) -> bool {
+        // (or it has been asked for every way there is, and there is no room: outside)
+        self.pending.is_none() && (!self.surfaces.is_empty() || self.attempt >= QUERY_SHAPES.len())
+    }
+
+    /// Another module's query is with the headset: the room's waits.
+    pub(crate) fn hold(&mut self, held: bool) {
+        self.held = held;
+    }
 }
 
 /// Quest runtimes reject some query shapes with ERROR_VALIDATION_FAILURE
@@ -199,7 +216,7 @@ fn query_scene(
     time: Res<Time<Real>>,
     mut query: ResMut<SceneQuery>,
 ) {
-    if query.pending.is_some() {
+    if query.pending.is_some() || query.held {
         return;
     }
     let shape = if !query.surfaces.is_empty() {
@@ -386,7 +403,11 @@ fn on_scene_event(
             }
             let scanned = query.surfaces.iter().any(|s| s.label.contains("FLOOR"));
             // Free roam (outside) never wants a room scan.
-            if !scanned && !capture.auto_requested && !settings.free_roam() {
+            // Not on one empty answer: only once every way of asking has
+            // come back without a floor. (Space Setup is a system prompt
+            // over the game.)
+            let asked_every_way = query.attempt >= QUERY_SHAPES.len();
+            if !scanned && asked_every_way && !capture.auto_requested && !settings.free_roam() {
                 capture.auto_requested = true;
                 capture.requested = true;
                 info!("Room scan: no room scan found, starting Space Setup");
