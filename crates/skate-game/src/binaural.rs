@@ -93,6 +93,11 @@ struct Phonon {
     /// The built-in HRTF at each sampling rate asked for so far.
     hrtfs: std::sync::Mutex<Vec<(u32, usize)>>,
     hrtf_create: unsafe extern "C" fn(Handle, *mut AudioSettings, *mut HrtfSettings, *mut Handle) -> i32,
+    /// Held for every call into the library. Effects are made where a sound
+    /// is started and used and released where sound is mixed, and Steam
+    /// Audio did not stand those happening at once: a sound came out wrong,
+    /// and on the Quest the mixer aborted on a mutex already destroyed.
+    calls: std::sync::Mutex<()>,
 }
 
 // SAFETY: the context and HRTFs are Steam Audio objects made to be shared between threads; each
@@ -101,6 +106,10 @@ unsafe impl Send for Phonon {}
 unsafe impl Sync for Phonon {}
 
 impl Phonon {
+    fn call(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn load() -> Result<Self, String> {
         let mut places: Vec<std::path::PathBuf> = std::env::var_os("SK8_STEAM_AUDIO").map(Into::into).into_iter().collect();
         places.push("libphonon.so".into());
@@ -134,6 +143,7 @@ impl Phonon {
                 effect_apply: std::mem::transmute(symbol(b"iplBinauralEffectApply\0")?),
                 hrtf_create: std::mem::transmute(symbol(b"iplHRTFCreate\0")?),
                 hrtfs: Default::default(),
+                calls: Default::default(),
                 _library: library,
             })
         }
@@ -149,7 +159,10 @@ impl Phonon {
             HrtfSettings { kind: 0, sofa_file_name: std::ptr::null(), sofa_data: std::ptr::null(), sofa_data_size: 0, volume: 1.0, norm_type: 0 };
         let mut hrtf: Handle = std::ptr::null_mut();
         // SAFETY: the context is live and the settings are as phonon.h lays them out.
-        let status = unsafe { (self.hrtf_create)(self.context, &mut audio, &mut settings, &mut hrtf) };
+        let status = {
+            let _call = self.call();
+            unsafe { (self.hrtf_create)(self.context, &mut audio, &mut settings, &mut hrtf) }
+        };
         if status != 0 || hrtf.is_null() {
             warn!("Steam Audio: no HRTF at {rate} Hz ({status})");
             return None;
@@ -260,6 +273,7 @@ unsafe impl Sync for Effect {}
 impl Drop for Effect {
     fn drop(&mut self) {
         // SAFETY: made by iplBinauralEffectCreate and released once.
+        let _call = self.phonon.call();
         unsafe { (self.phonon.effect_release)(&mut self.effect) };
     }
 }
@@ -327,7 +341,10 @@ impl CleanPlayback {
             peak_delays: std::ptr::null_mut(),
         };
         // SAFETY: the effect and HRTF are live, and both buffers are FRAME samples a channel.
-        unsafe { (effect.phonon.effect_apply)(effect.effect, &mut params, &mut from, &mut to) };
+        {
+            let _call = effect.phonon.call();
+            unsafe { (effect.phonon.effect_apply)(effect.effect, &mut params, &mut from, &mut to) };
+        }
         self.ready.extend(left.iter().zip(&right).flat_map(|(l, r)| [*l, *r]));
         true
     }
@@ -385,7 +402,10 @@ impl Decodable for CleanPcm {
             let mut settings = BinauralEffectSettings { hrtf };
             let mut effect: Handle = std::ptr::null_mut();
             // SAFETY: the context and HRTF are live and the settings are as phonon.h lays them out.
-            let status = unsafe { (phonon.effect_create)(phonon.context, &mut audio, &mut settings, &mut effect) };
+            let status = {
+                let _call = phonon.call();
+                unsafe { (phonon.effect_create)(phonon.context, &mut audio, &mut settings, &mut effect) }
+            };
             (status == 0 && !effect.is_null()).then(|| (Effect { phonon, effect, hrtf }, voice.clone()))
         });
         CleanPlayback {
