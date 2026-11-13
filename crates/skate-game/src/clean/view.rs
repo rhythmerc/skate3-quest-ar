@@ -65,13 +65,13 @@ fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
         .all_quads()
         .flat_map(|q| [0, 2, 1, 0, 3, 2].map(|i| q[i].to_array()))
         .collect();
-    let mut mesh = Mesh::new(
+    let normals: Vec<[f32; 3]> = geometry.normals().iter().flat_map(|n| [0, 2, 1, 0, 3, 2].map(|i| n[i].to_array())).collect();
+    Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.compute_flat_normals();
-    mesh
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
 }
 
 pub(crate) fn desktop_world(

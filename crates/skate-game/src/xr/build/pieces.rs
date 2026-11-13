@@ -198,6 +198,11 @@ impl PieceKind {
     }
 }
 
+/// Faces that meet at less than this are one smooth surface when drawn
+/// ([`PieceGeometry::normals`]). A bowl's steps round its transition and
+/// round its corners are 15 degrees each; a box's edges are 90.
+pub(crate) const CREASE: f32 = 24.0 * std::f32::consts::PI / 180.0;
+
 /// Resize range for the piece's main dimension.
 pub(crate) const MIN_SIZE: f32 = 0.5;
 pub(crate) const MAX_SIZE: f32 = 2.5;
@@ -323,6 +328,37 @@ impl PieceGeometry {
             let p = Vec2::new(p.x, p.z);
             (lo.min(p), hi.max(p))
         })
+    }
+
+    /// A normal for each corner of [`Self::all_quads`], for drawing: a
+    /// curved surface (a transition, a bowl, a drawn ramp's bend) is shaded
+    /// as one smooth surface, while faces that meet at more than
+    /// [`CREASE`] keep their edge. Each corner takes the faces that share
+    /// its place and face about the same way, by their area.
+    pub(crate) fn normals(&self) -> Vec<[Vec3; 4]> {
+        // Each face's normal, its length its area.
+        let faces: Vec<Vec3> = self.all_quads().map(|q| (quad_normal(q) + (q[3] - q[0]).cross(q[2] - q[0])) * 0.5).collect();
+        let key = |p: Vec3| ((p.x * 1000.0).round() as i32, (p.y * 1000.0).round() as i32, (p.z * 1000.0).round() as i32);
+        let mut at: std::collections::HashMap<(i32, i32, i32), Vec<usize>> = Default::default();
+        for (index, q) in self.all_quads().enumerate() {
+            for &p in q {
+                let faces = at.entry(key(p)).or_default();
+                if faces.last() != Some(&index) {
+                    faces.push(index);
+                }
+            }
+        }
+        let limit = CREASE.cos();
+        self.all_quads()
+            .enumerate()
+            .map(|(index, q)| {
+                let own = faces[index].normalize_or(Vec3::Y);
+                q.map(|p| {
+                    let sum: Vec3 = at[&key(p)].iter().map(|&f| faces[f]).filter(|n| n.normalize_or_zero().dot(own) >= limit).sum();
+                    sum.try_normalize().unwrap_or(own)
+                })
+            })
+            .collect()
     }
 
     /// Texture coordinates for [`Self::all_quads`], in metres: faces across
@@ -923,6 +959,45 @@ mod tests {
         assert_eq!(Piece::new(PieceKind::Kicker).joins().len(), 2);
         assert_eq!(Piece::new(PieceKind::Platform).joins().len(), 4);
         assert!(Piece::new(PieceKind::Bowl).joins().is_empty());
+    }
+
+    #[test]
+    fn curved_surfaces_are_shaded_smooth_and_boxes_keep_their_edges() {
+        // A box: every corner's normal is its face's.
+        let g = Piece::new(PieceKind::Platform).geometry();
+        for (q, normals) in g.all_quads().zip(g.normals()) {
+            let face = quad_normal(q).normalize();
+            assert!(normals.iter().all(|n| n.distance(face) < 1e-4));
+        }
+        // A quarter pipe's transition: where two of its faces meet, both have the same normal
+        // there, between the two faces'.
+        for kind in [PieceKind::QuarterPipe, PieceKind::Bowl, PieceKind::Pool] {
+            let g = Piece::new(kind).geometry();
+            let normals = g.normals();
+            // (both triangles: an end cap can come to a point)
+            let whole = |q: &[Vec3; 4]| (quad_normal(q) + (q[3] - q[0]).cross(q[2] - q[0])).normalize();
+            let quads: Vec<&[Vec3; 4]> = g.all_quads().collect();
+            let (mut shared, mut smooth) = (0, 0);
+            for (i, a) in quads.iter().enumerate() {
+                let face = whole(a);
+                assert!(normals[i].iter().all(|n| (n.length() - 1.0).abs() < 1e-4 && n.dot(face) > CREASE.cos() - 1e-3), "{kind:?}");
+                for (j, b) in quads.iter().enumerate().skip(i + 1) {
+                    let other = whole(b);
+                    if face.dot(other) < CREASE.cos() + 0.02 || face.dot(other) > 0.9999 {
+                        continue;
+                    }
+                    for (ci, p) in a.iter().enumerate() {
+                        for (cj, q) in b.iter().enumerate() {
+                            if p.distance(*q) < 1e-4 {
+                                shared += 1;
+                                smooth += (normals[i][ci].distance(normals[j][cj]) < 0.2) as usize;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(shared > 20 && smooth as f32 > shared as f32 * 0.9, "{kind:?}: {smooth} of {shared} shared corners agree");
+        }
     }
 
     #[test]

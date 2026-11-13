@@ -1769,6 +1769,13 @@ fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
         .filter(|(i, _)| seen(i))
         .flat_map(|(_, q)| [0, 2, 1, 0, 3, 2].map(|i| q[i].to_array()))
         .collect();
+    let normals: Vec<[f32; 3]> = geometry
+        .normals()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| seen(i))
+        .flat_map(|(_, n)| [0, 2, 1, 0, 3, 2].map(|i| n[i].to_array()))
+        .collect();
     let uvs: Vec<[f32; 2]> = geometry
         .uvs()
         .iter()
@@ -1776,13 +1783,13 @@ fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
         .filter(|(i, _)| seen(i))
         .flat_map(|(_, uv)| [0, 2, 1, 0, 3, 2].map(|i| uv[i].to_array()))
         .collect();
-    let mut mesh = Mesh::new(
+    let mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.compute_flat_normals();
     mesh
 }
 
