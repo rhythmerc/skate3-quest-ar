@@ -11,6 +11,10 @@ CREDITS.json.
 Loops are built in the frequency domain, so they repeat without a seam, and
 none has a narrow peak (a whistle or a squeak) in it: `check` measures that.
 
+The app is built with whatever is in clean-audio/: this script puts the
+synthesised set there, `restore_recordings.py` the recorded one (which the
+app ships with for now).
+
 Usage: scripts/cleanroom/synth_sounds.py [--check]
 """
 import json

@@ -2193,7 +2193,9 @@ fn show_drawn(
             if let Some(first) = state.draft.first() {
                 let origin = Vec3::new(first.at[0], first.base, first.at[2]);
                 let path = draft_path(&state.draft, state.pending, origin, metres);
-                if path.nodes.len() >= kind.least_nodes() {
+                // (a bowl is shown by its points alone: filled in as it is drawn, its preview
+                // jumps about with every point)
+                if path.nodes.len() >= kind.least_nodes() && kind != PieceKind::Pool {
                     preview = Some((origin, path));
                 }
             }

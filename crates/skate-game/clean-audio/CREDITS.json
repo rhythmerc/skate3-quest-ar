@@ -1,33 +1,33 @@
 [
  {
   "sound": "bail_1",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/gerardcatala/sounds/153285/",
+  "author": "gerardcatala",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "bail_2",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/Bruno_Garcez/sounds/243767/",
+  "author": "Bruno_Garcez",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "catch_1",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/nolimitkid/sounds/515230/",
+  "author": "nolimitkid",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "catch_2",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/nolimitkid/sounds/515225/",
+  "author": "nolimitkid",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "catch_3",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/mbezzola/sounds/105075/",
+  "author": "mbezzola",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "chime",
@@ -79,87 +79,87 @@
  },
  {
   "sound": "grind_concrete",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/bspiller5/sounds/478166/",
+  "author": "bspiller5",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "grind_metal",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/C-V/sounds/845524/",
+  "author": "C-V",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "land_impact_1",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/BlackNeon1234/sounds/348321/",
+  "author": "BlackNeon1234",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "land_impact_2",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/nolimitkid/sounds/515229/",
+  "author": "nolimitkid",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "land_impact_3",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/Sheyvan/sounds/568406/",
+  "author": "Sheyvan",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "land_impact_4",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/BlackNeon1234/sounds/348321/",
+  "author": "BlackNeon1234",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "pop_1",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/nolimitkid/sounds/515226/",
+  "author": "nolimitkid",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "pop_2",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/Sheyvan/sounds/568406/",
+  "author": "Sheyvan",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "pop_3",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/nolimitkid/sounds/515229/",
+  "author": "nolimitkid",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "pop_4",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/mbezzola/sounds/105076/",
+  "author": "mbezzola",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "powerslide",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/jarrondesnudo/sounds/581379/",
+  "author": "jarrondesnudo",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "push_1",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/visionear/sounds/540777/",
+  "author": "visionear",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "push_2",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/visionear/sounds/540777/",
+  "author": "visionear",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "push_3",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/visionear/sounds/540777/",
+  "author": "visionear",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "roll_metal",
@@ -169,20 +169,21 @@
  },
  {
   "sound": "roll_rough",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/PHetish/sounds/398883/",
+  "author": "PHetish",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  },
  {
   "sound": "roll_smooth",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/neotronable/sounds/346380/",
+  "author": "neotronable",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page",
+  "changes": "Creaks and a board's resonance taken out (scripts/cleanroom/restore_recordings.py)"
  },
  {
   "sound": "roll_wood",
-  "url": "scripts/cleanroom/synth_sounds.py",
-  "author": "SK8 AR (original synthesis)",
-  "license": "Original work, generated from noise and sine synthesis; no recorded or game audio"
+  "url": "https://freesound.org/people/Bruno_Garcez/sounds/243762/",
+  "author": "Bruno_Garcez",
+  "license": "Creative Commons 0 (CC0 1.0 Public Domain Dedication), as shown on sound page"
  }
 ]

@@ -54,8 +54,9 @@ should be built the same way.
   proportions, posed from the state with two-bone IK feet on the deck, plus
   a procedural tumble for bails (`crates/skate-game/src/clean/skater.rs`; port
   the maths, it is about 300 lines).
-- **Sounds:** `crates/skate-game/clean-audio/`: 31 sounds synthesised by
-  `scripts/cleanroom/synth_sounds.py`, which also writes their `CREDITS.json`.
+- **Sounds:** `crates/skate-game/clean-audio/`. These are 22 CC0 recordings and
+  9 sounds synthesised by `scripts/cleanroom/synth_sounds.py`, with credits in
+  `CREDITS.json`.
 - **Rust host for reference:** `crates/skate-lite-sys` (bindings, built with
   `cc`) and `crates/skate-game/src/clean/` (collision grid, stepping with time
   scale, menus).

@@ -215,9 +215,13 @@ the source, with distance measured in real metres (full volume within 1 m,
 a quarter at 2 m), so it pans and fades as the skater rides around the room at
 any world scale (`xr/spatial_audio.rs`). With Steam Audio in the APK (`scripts/quest/fetch-steam-audio.sh`,
 run by the build scripts) they are heard through its HRTF, so the skater is placed in front, behind,
-above or below as well as left and right; without it they are panned. All 31 are original synthesis from
-`scripts/cleanroom/synth_sounds.py` (noise and decaying sines shaped like the thing that makes the
-sound; no recording is in them).
+above or below as well as left and right; without it they are panned. 22 are CC0 recordings from freesound.org (credits in
+`clean-audio/CREDITS.json`: nolimitkid, Sheyvan, mbezzola, BlackNeon1234,
+visionear, neotronable, PHetish, Bruno_Garcez, C-V, bspiller5,
+jarrondesnudo, gerardcatala), put there at 48 kHz by `scripts/cleanroom/restore_recordings.py`,
+which also takes the creaks out of the wheels' loop; the other 9 (flips, footsteps, the chime and
+the metal roll) are original synthesis. `scripts/cleanroom/synth_sounds.py` makes a wholly
+synthesised set of all 31 instead (not what the app ships with for now).
 In the imported-disc tier, `SKATE_AUDIO=retail` switches to the retail
 player-audio runtime.
 
