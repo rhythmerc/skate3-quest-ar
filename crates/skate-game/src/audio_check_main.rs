@@ -18,6 +18,7 @@
 //! script. Recording the output device's monitor while this runs is what turns "the sink reports
 //! playing" into evidence that samples reached the device.
 
+mod binaural;
 mod skate_audio;
 mod stream_pcm;
 

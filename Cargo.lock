@@ -4875,6 +4875,7 @@ dependencies = [
 name = "skate-game"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bevy",
  "bevy_mod_openxr",
  "bevy_mod_xr",
@@ -4899,6 +4900,7 @@ dependencies = [
  "skate-vehicles",
  "tracing-log",
  "wgpu",
+ "wgpu-hal",
  "winit",
  "zip",
 ]

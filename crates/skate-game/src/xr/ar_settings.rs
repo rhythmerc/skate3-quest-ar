@@ -81,6 +81,10 @@ pub(crate) struct ArSettings {
     /// Build mode draws the room's surfaces that are ridden (the overlay).
     #[serde(default)]
     pub build_surfaces: bool,
+    /// Real things hide the skater and the park (`xr::occlusion`): costs
+    /// GPU time, so off until asked for.
+    #[serde(default)]
+    pub occlusion: super::occlusion::Occlusion,
     #[serde(skip)]
     pub revision: u64,
 }
@@ -100,6 +104,7 @@ impl Default for ArSettings {
             room_light_strength: 1.0,
             build_hints: true,
             build_surfaces: false,
+            occlusion: Default::default(),
             revision: 0,
         }
     }

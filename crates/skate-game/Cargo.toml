@@ -42,7 +42,7 @@ retail = [
     "dep:blake3", "dep:image", "dep:zip", "zip/deflate-flate2-zlib-rs",
 ]
 # OpenXR passthrough mode (`--xr`); the Quest build always enables it.
-xr = ["dep:bevy_mod_openxr", "dep:bevy_mod_xr", "dep:openxr", "dep:roomtone-sys"]
+xr = ["dep:bevy_mod_openxr", "dep:bevy_mod_xr", "dep:openxr", "dep:roomtone-sys", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # Desktop XR keeps a mirror window beside the headset view.
 xr-window = ["xr", "bevy_mod_openxr/window_support"]
 
@@ -69,6 +69,10 @@ blake3 = { version = "=1.8.7", optional = true }
 bevy_mod_openxr = { version = "=0.5.0", optional = true, features = ["fb_passthrough"] }
 bevy_mod_xr = { version = "=0.5.0", optional = true }
 openxr = { version = "0.21.1", optional = true }
+# The headset's depth images wrapped as textures (`xr::occlusion`), as bevy_mod_openxr wraps its swapchain's.
+wgpu = { version = "=27.0.1", default-features = false, features = ["vulkan"], optional = true }
+wgpu-hal = { version = "=27.0.4", default-features = false, features = ["vulkan"], optional = true }
+ash = { version = "0.38", optional = true }
 # Unzips an imported Skate 3 bundle in the headset (xr::ui::import; retail only).
 zip = { version = "6", optional = true, default-features = false }
 image = { version = "=0.25.10", optional = true, default-features = false, features = ["png", "jpeg"] }

@@ -280,6 +280,12 @@ fn ar_widgets(world: &World) -> Vec<Widget> {
     if let Some(problem) = world.resource::<RoomLight>().problem(s.room_light) {
         w.push(Widget::info(problem));
     }
+    w.push(Widget::button("occlusion", format!("Real things hide the skater and park: {}", s.occlusion.name())));
+    match (s.occlusion, *world.resource::<crate::xr::occlusion::OcclusionProblem>().0.lock().unwrap()) {
+        (crate::xr::occlusion::Occlusion::Off, _) => {}
+        (_, Some(problem)) => w.push(Widget::info(problem)),
+        _ => w.push(Widget::info("Uses the headset's depth sensing: soft looks best, hard costs less.")),
+    }
     w.extend([
         Widget::toggle("hud", "Trick and points readout", s.hud),
         Widget::button("intro", "Replay the intro"),
@@ -313,6 +319,7 @@ fn ar_act(widget: &str, world: &mut World) -> Outcome {
         "hide_all" => s.set_all_shown(false),
         "hud" => s.hud = !s.hud,
         "room_light" => s.room_light = !s.room_light,
+        "occlusion" => s.occlusion = s.occlusion.next(),
         _ => {}
     });
     // The room's light is read from a passthrough camera: ask for it once.
