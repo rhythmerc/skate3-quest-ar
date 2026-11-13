@@ -213,7 +213,9 @@ copings), powerslides, pops, flips, catches, landings, pushes, footsteps and
 bails. Every sound is spatial: the headset is the listener and the skater
 the source, with distance measured in real metres (full volume within 1 m,
 a quarter at 2 m), so it pans and fades as the skater rides around the room at
-any world scale (`xr/spatial_audio.rs`). All 31 are original synthesis from
+any world scale (`xr/spatial_audio.rs`). With Steam Audio in the APK (`scripts/quest/fetch-steam-audio.sh`,
+run by the build scripts) they are heard through its HRTF, so the skater is placed in front, behind,
+above or below as well as left and right; without it they are panned. All 31 are original synthesis from
 `scripts/cleanroom/synth_sounds.py` (noise and decaying sines shaped like the thing that makes the
 sound; no recording is in them).
 In the imported-disc tier, `SKATE_AUDIO=retail` switches to the retail

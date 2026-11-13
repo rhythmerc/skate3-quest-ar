@@ -6,6 +6,12 @@ Bevy sources retain their MIT and Apache licenses under `vendor/`.
 mixed reality, https://github.com/rhythmerc/roomtone), MIT; its license is
 alongside the source. See `docs/room-lighting.md`.
 
+The Quest apps can carry Steam Audio's `libphonon.so` (Valve Corporation, Apache-2.0,
+https://github.com/ValveSoftware/steam-audio), fetched unmodified by
+`scripts/quest/fetch-steam-audio.sh` and loaded at run time for the skate sounds' HRTF
+(`crates/skate-game/src/binaural.rs`). It is not in this repository; its own third-party notices
+are the release's `THIRDPARTY.md`.
+
 Retail world shading equations were referenced against Alex's Skate3Recomp
 native renderer. Source revision and implementation scope are documented in
 `docs/retail-renderer.md`. No game shaders or texture payloads are bundled.

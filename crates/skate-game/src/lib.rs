@@ -20,6 +20,7 @@ mod apt_text;
 mod apt_vm;
 #[cfg(feature = "retail")]
 mod assets;
+mod binaural;
 #[cfg(feature = "retail")]
 mod camera;
 mod config;

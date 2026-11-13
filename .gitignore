@@ -91,3 +91,6 @@ __pycache__/
 
 # Clean-room asset pack bundled into the Quest APK (fetched, not committed).
 /crates/skate-quest/apk-assets/
+
+# Steam Audio (scripts/quest/fetch-steam-audio.sh), never committed.
+/vendor/steam-audio/

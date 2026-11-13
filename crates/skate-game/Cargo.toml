@@ -55,6 +55,8 @@ skate-audio-formats = { workspace = true, optional = true }
 skate-audio-core = { workspace = true, optional = true }
 half = { version = "=2.7.1", optional = true }
 serde_json.workspace = true
+# Steam Audio (libphonon.so) is loaded at run time, if it is there (src/binaural.rs).
+libloading = "0.8"
 serde.workspace = true
 skate-mods = { path = "../skate-mods", optional = true }
 skate-lite-sys = { path = "../skate-lite-sys" }

@@ -24,7 +24,7 @@ use bevy::prelude::*;
 #[cfg(feature = "retail")]
 use skate_core::physics::phase::PhysicsEvent;
 
-use crate::stream_pcm::StreamPcm;
+use crate::binaural::{CleanPcm, Emitter, Voice};
 #[cfg(feature = "retail")]
 use super::{FrontEndSoundRequest, PlayerAudioObservation};
 
@@ -194,8 +194,12 @@ struct CleanAudio {
     spatial: bool,
     /// The skater's latest world position, where spatial sounds are emitted.
     source: Vec3,
-    shots: Vec<(Shot, Vec<Handle<StreamPcm>>)>,
+    shots: Vec<(Shot, Vec<Handle<CleanPcm>>)>,
     loops: Vec<(Loop, Entity, f32)>,
+    /// Heard through Steam Audio's HRTF (`crate::binaural`): where the sounds are from the head,
+    /// and each loop's voice (its pitch is the voice's, not the sink's).
+    emitter: Option<Arc<Emitter>>,
+    voices: Vec<Option<Arc<Voice>>>,
     targets: [(f32, f32); 7],
     last_pick: [usize; 8],
     rng: u32,
@@ -255,7 +259,7 @@ pub(crate) struct Sk8Sounds {
 /// by [`Sk8Sounds`] instead of the retail physics observation.
 pub(crate) fn install_sk8(app: &mut App) {
     use bevy::audio::AddAudioSource;
-    app.add_audio_source::<StreamPcm>()
+    app.add_audio_source::<CleanPcm>()
         .init_resource::<SurfaceHints>()
         .init_resource::<Sk8Sounds>()
         .add_systems(Startup, setup)
@@ -373,21 +377,26 @@ fn parse_wav(bytes: &[u8]) -> Option<(Vec<i16>, u16, u32)> {
 
 fn setup(
     mut commands: Commands,
-    mut assets: ResMut<Assets<StreamPcm>>,
+    mut assets: ResMut<Assets<CleanPcm>>,
     spatial: Option<Res<SpatialSkateAudio>>,
 ) {
-    let spatial = spatial.is_some();
-    let mut load = |name: &str, looping: bool| -> Option<Handle<StreamPcm>> {
+    // In 3D the sounds go through Steam Audio's HRTF where it is there, and are panned where not.
+    let emitter = (spatial.is_some() && crate::binaural::available()).then(|| Arc::new(Emitter::default()));
+    let spatial = spatial.is_some() && emitter.is_none();
+    let mut voices = Vec::new();
+    let mut load = |name: &str, looping: bool| -> Option<(Handle<CleanPcm>, Option<Arc<Voice>>)> {
         let (_, bytes) = WAVS.iter().find(|(n, _)| *n == name)?;
-        let Some((samples, channels, rate)) = parse_wav(bytes) else {
-            error!("SKATE_CLEAN_AUDIO {name}.wav is not 16-bit PCM");
+        let Some((samples, 1, rate)) = parse_wav(bytes) else {
+            error!("SKATE_CLEAN_AUDIO {name}.wav is not mono 16-bit PCM");
             return None;
         };
-        Some(assets.add(StreamPcm::from_i16(Arc::new(samples), channels, rate, looping)))
+        let voice = emitter.clone().map(Voice::new);
+        Some((assets.add(CleanPcm::new(Arc::new(samples), rate, looping, voice.clone())), voice))
     };
     let mut loops = Vec::new();
     for kind in Loop::ALL {
-        if let Some(handle) = load(kind.file(), true) {
+        if let Some((handle, voice)) = load(kind.file(), true) {
+            voices.push(voice);
             // Inline-looping source played once: it never ends, and Bevy's whole-source loop
             // (a buffering repeater) is not needed.
             let entity = commands
@@ -414,14 +423,16 @@ fn setup(
                         .and_then(|rest| rest.strip_prefix('_'))
                         .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
             })
-            .filter_map(|(n, _)| load(n, false))
+            .filter_map(|(n, _)| load(n, false).map(|(handle, _)| handle))
             .collect();
         count += variants.len();
         shots.push((shot, variants));
     }
-    info!("SKATE_CLEAN_AUDIO loaded {count} sounds (spatial={spatial})");
+    info!("SKATE_CLEAN_AUDIO loaded {count} sounds (spatial={spatial} hrtf={})", emitter.is_some());
     commands.insert_resource(CleanAudio {
         spatial,
+        emitter,
+        voices,
         source: Vec3::ZERO,
         shots,
         loops,
@@ -640,8 +651,18 @@ fn mix(
     mut sinks: Query<&mut AudioSink>,
     mut spatial_sinks: Query<&mut SpatialAudioSink>,
     time: Res<Time<bevy::time::Real>>,
+    listener: Query<&Transform, With<bevy::audio::SpatialListener>>,
+    scale: Res<bevy::audio::DefaultSpatialScale>,
 ) {
     let Some(mut audio) = audio else { return };
+    // Through the HRTF: where the skater is from the head, and as loud as the panned sounds were
+    // at that distance (full level within one spatial unit, the inverse square beyond it).
+    if let (Some(emitter), Ok(head)) = (&audio.emitter, listener.single()) {
+        let to_source = audio.source - head.translation;
+        let units = (to_source * scale.0.0).length();
+        emitter.set(head.rotation.inverse() * to_source, (1.0 / (units * units).max(1e-6)).min(1.0));
+    }
+    let voices = audio.voices.clone();
     let blend = (time.delta_secs() / FADE_S).min(1.0);
     let paused = audio.paused;
     let targets = audio.targets;
@@ -651,7 +672,12 @@ fn mix(
         *volume += (target - *volume) * blend;
         let level = Volume::Linear(*volume * LOOP_GAIN * MASTER);
         let speed = pitch.clamp(0.5, 2.0);
-        if let Ok(mut sink) = sinks.get_mut(*entity) {
+        if let Some(voice) = voices.get(i).and_then(Option::as_ref) {
+            voice.set_pitch(speed);
+            if let Ok(mut sink) = sinks.get_mut(*entity) {
+                sink.set_volume(level);
+            }
+        } else if let Ok(mut sink) = sinks.get_mut(*entity) {
             sink.set_volume(level);
             sink.set_speed(speed);
         } else if let Ok(mut sink) = spatial_sinks.get_mut(*entity) {

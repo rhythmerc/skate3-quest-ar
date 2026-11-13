@@ -14,6 +14,10 @@ export ANDROID_NDK_ROOT
 if [ ! -f crates/skate-quest/runtime_libs/arm64-v8a/libopenxr_loader.so ]; then
   scripts/quest/fetch-openxr-loader.sh
 fi
+# Steam Audio, for the skate sounds' HRTF (without it they are panned).
+if [ ! -f crates/skate-quest/runtime_libs/arm64-v8a/libphonon.so ]; then
+  scripts/quest/fetch-steam-audio.sh
+fi
 export RUST_MIN_STACK="${RUST_MIN_STACK:-268435456}"
 cargo apk build -p sk8-quest --release --lib
 APK="$(ls -t target/release/apk/sk8ar*.apk | grep -v unaligned | head -1)"
