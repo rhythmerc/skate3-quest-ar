@@ -12,6 +12,7 @@
 //! comes out in stereo: the mono sound, read at the voice's pitch, at the
 //! emitter's level for its distance, and put through a binaural effect of its
 //! own toward the emitter's direction from the head.
+use crate::clean_mix::{Buffer, Filter, Strip};
 use bevy::audio::{Decodable, Source};
 use bevy::prelude::*;
 use std::collections::VecDeque;
@@ -245,18 +246,26 @@ impl Voice {
 // ---------------------------------------------------------------- the source
 
 /// Mono 16-bit PCM as a Bevy audio source: as it is, or (with a voice, and
-/// Steam Audio loaded) in stereo through the HRTF.
+/// Steam Audio loaded) in stereo through the HRTF. A live one (`clean_mix`)
+/// goes through its kind's level and EQ first, and a live loop takes up new
+/// samples as it plays.
 #[derive(Asset, TypePath, Clone)]
 pub(crate) struct CleanPcm {
-    samples: Arc<Vec<i16>>,
+    buffer: Arc<Buffer>,
+    strip: Option<Arc<Strip>>,
     rate: u32,
     looping: bool,
     voice: Option<Arc<Voice>>,
 }
 
 impl CleanPcm {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(samples: Arc<Vec<i16>>, rate: u32, looping: bool, voice: Option<Arc<Voice>>) -> Self {
-        Self { samples, rate, looping, voice }
+        Self { buffer: Buffer::new(samples), strip: None, rate, looping, voice }
+    }
+
+    pub(crate) fn live(buffer: Arc<Buffer>, strip: Arc<Strip>, rate: u32, looping: bool, voice: Option<Arc<Voice>>) -> Self {
+        Self { buffer, strip: Some(strip), rate, looping, voice }
     }
 }
 
@@ -280,6 +289,10 @@ impl Drop for Effect {
 
 pub(crate) struct CleanPlayback {
     samples: Arc<Vec<i16>>,
+    /// Where a loop's samples come from, and which of them it has.
+    buffer: Arc<Buffer>,
+    seen: u32,
+    filter: Option<Filter>,
     rate: u32,
     looping: bool,
     /// Where in `samples` the next one read is.
@@ -287,7 +300,7 @@ pub(crate) struct CleanPlayback {
     spatial: Option<(Effect, Arc<Voice>)>,
     /// The emitter's level as the last frame ended (levels ramp over a frame).
     gain: f32,
-    /// Rendered stereo, waiting to be handed out.
+    /// Rendered sound (stereo through the HRTF, else mono), waiting to be handed out.
     ready: VecDeque<f32>,
     /// Frames of silence still to go through the effect after the sound ends (the HRTF's tail).
     tail: u32,
@@ -304,20 +317,30 @@ impl CleanPlayback {
         !self.looping && self.at >= self.samples.len() as f64
     }
 
-    /// One frame through the effect into `ready`; false once the sound and its tail are done.
+    /// One frame into `ready`; false once the sound (and through the HRTF, its tail) is done.
     fn render(&mut self) -> bool {
-        let Some((effect, voice)) = &self.spatial else { return false };
+        if self.looping
+            && let Some(samples) = self.buffer.newer(&mut self.seen)
+        {
+            self.samples = samples;
+        }
+        let mut count = FRAME;
         if self.ended() {
-            if self.tail == 0 {
+            if self.spatial.is_none() || self.tail == 0 {
                 return false;
             }
             self.tail -= 1;
+        } else if self.spatial.is_none() && !self.looping {
+            count = FRAME.min(self.samples.len() - self.at as usize);
         }
-        let pitch = f64::from(load(&voice.pitch));
-        let target = load(&voice.emitter.gain);
+        let (pitch, target) = match &self.spatial {
+            Some((_, voice)) => (f64::from(load(&voice.pitch)), load(&voice.emitter.gain)),
+            // As it is: at the sink's own speed and panning.
+            None => (1.0, 1.0),
+        };
         let mut mono = [0.0f32; FRAME];
         let mut at = self.at;
-        for (i, out) in mono.iter_mut().enumerate() {
+        for (i, out) in mono[..count].iter_mut().enumerate() {
             let (whole, part) = (at.floor(), at.fract() as f32);
             let (a, b) = (self.sample(whole as usize), self.sample(whole as usize + 1));
             let gain = self.gain + (target - self.gain) * (i as f32 / FRAME as f32);
@@ -328,6 +351,13 @@ impl CleanPlayback {
             at %= self.samples.len() as f64;
         }
         (self.at, self.gain) = (at, target);
+        if let Some(filter) = &mut self.filter {
+            filter.run(&mut mono[..count]);
+        }
+        let Some((effect, voice)) = &self.spatial else {
+            self.ready.extend(&mono[..count]);
+            return true;
+        };
         let (mut left, mut right) = ([0.0f32; FRAME], [0.0f32; FRAME]);
         let mut input = [mono.as_mut_ptr()];
         let mut output = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -354,24 +384,10 @@ impl Iterator for CleanPlayback {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        if self.spatial.is_some() {
-            if self.ready.is_empty() && !self.render() {
-                return None;
-            }
-            return self.ready.pop_front();
+        if self.ready.is_empty() && !self.render() {
+            return None;
         }
-        // As it is: mono, at the sink's own speed and panning.
-        let n = self.samples.len();
-        let index = self.at as usize;
-        if index >= n {
-            if !self.looping || n == 0 {
-                return None;
-            }
-            self.at = 0.0;
-        }
-        let s = self.sample(self.at as usize);
-        self.at += 1.0;
-        Some(s)
+        self.ready.pop_front()
     }
 }
 
@@ -408,8 +424,13 @@ impl Decodable for CleanPcm {
             };
             (status == 0 && !effect.is_null()).then(|| (Effect { phonon, effect, hrtf }, voice.clone()))
         });
+        let mut seen = 0;
+        let samples = self.buffer.newer(&mut seen).unwrap_or_else(|| self.buffer.get());
         CleanPlayback {
-            samples: self.samples.clone(),
+            samples,
+            buffer: self.buffer.clone(),
+            seen,
+            filter: self.strip.clone().map(|strip| Filter::new(strip, self.rate)),
             rate: self.rate,
             looping: self.looping,
             at: 0.0,

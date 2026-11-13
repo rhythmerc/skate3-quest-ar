@@ -21,6 +21,8 @@ mod apt_vm;
 #[cfg(feature = "retail")]
 mod assets;
 mod binaural;
+mod clean_mix;
+mod clean_synth;
 #[cfg(feature = "retail")]
 mod camera;
 mod config;

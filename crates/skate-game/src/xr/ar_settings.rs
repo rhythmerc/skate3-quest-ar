@@ -85,6 +85,9 @@ pub(crate) struct ArSettings {
     /// GPU time, so off until asked for.
     #[serde(default)]
     pub occlusion: super::occlusion::Occlusion,
+    /// Developer's pages in the menu (the sound lab). No row turns it on: it is set in the file.
+    #[serde(default)]
+    pub dev: bool,
     #[serde(skip)]
     pub revision: u64,
 }
@@ -105,6 +108,7 @@ impl Default for ArSettings {
             build_hints: true,
             build_surfaces: false,
             occlusion: Default::default(),
+            dev: false,
             revision: 0,
         }
     }

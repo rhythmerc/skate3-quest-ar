@@ -19,6 +19,7 @@ pub(crate) mod hud;
 #[cfg(feature = "retail")]
 pub(crate) mod import;
 pub(crate) mod pages;
+mod sound_lab;
 mod pointer;
 
 use super::actions::LatestTouch;
@@ -238,6 +239,7 @@ impl Plugin for XrUiPlugin {
         app.add_plugins(import::ImportPlugin);
         let mut providers = UiProviders::default();
         providers.0.push(Arc::new(pages::Shared));
+        providers.0.push(Arc::new(sound_lab::SoundLabPages));
         app.insert_resource(providers)
             .init_resource::<ControlsSheet>()
             .init_resource::<XrUi>()

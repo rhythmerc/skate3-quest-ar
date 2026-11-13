@@ -26,6 +26,8 @@ use bevy::prelude::*;
 use skate_core::physics::phase::PhysicsEvent;
 
 use crate::binaural::{CleanPcm, Emitter, Voice};
+use crate::clean_mix::{Buffer, Strip, Tune, Tuning};
+use crate::clean_synth::{KINDS, RATE};
 #[cfg(feature = "retail")]
 use super::{FrontEndSoundRequest, PlayerAudioObservation};
 
@@ -205,6 +207,13 @@ struct CleanAudio {
     /// and each loop's voice (its pitch is the voice's, not the sink's).
     emitter: Option<Arc<Emitter>>,
     voices: Vec<Option<Arc<Voice>>>,
+    /// Each kind's level and EQ ([`KINDS`]' order: the loops, then the shots), its sounds'
+    /// samples as they play, and the recordings they started as.
+    strips: Vec<Arc<Strip>>,
+    buffers: Vec<Vec<Arc<Buffer>>>,
+    recorded: Vec<Vec<Arc<Vec<i16>>>>,
+    /// Wooden ramps have a loop of their own (the synthesised one; the recording creaks).
+    wood_loop: bool,
     targets: [(f32, f32); 7],
     last_pick: [usize; 8],
     rng: u32,
@@ -233,7 +242,7 @@ pub(super) fn install(app: &mut App) {
     app.add_audio_source::<CleanPcm>()
         .init_resource::<SurfaceHints>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (observe, frontend, mix, follow_skater).chain());
+        .add_systems(Update, (observe, frontend, lab, mix, follow_skater).chain());
 }
 
 /// A one-shot from the clean-room engine.
@@ -271,7 +280,7 @@ pub(crate) fn install_sk8(app: &mut App) {
         .init_resource::<SurfaceHints>()
         .init_resource::<Sk8Sounds>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (observe_sk8, mix, follow_skater).chain());
+        .add_systems(Update, (observe_sk8, lab, mix, follow_skater).chain());
 }
 
 fn observe_sk8(
@@ -330,8 +339,7 @@ fn observe_sk8(
     } else if sounds.grounded {
         // On a wooden ramp the wheels sound lower, not different: the wood recording
         // (`roll_wood`) is a creaking board, a steady squeak under every roll.
-        let kind = Loop::RollSmooth;
-        let pitch = if hints.on_wood(position) { pitch * WOOD_PITCH } else { pitch };
+        let (kind, pitch) = audio.rolling(hints.on_wood(position), pitch);
         if sounds.powersliding {
             audio.set(kind, level * 0.5, pitch);
             let (volume, pitch) = slide(speed);
@@ -390,64 +398,70 @@ fn setup(
     mut commands: Commands,
     mut assets: ResMut<Assets<CleanPcm>>,
     spatial: Option<Res<SpatialSkateAudio>>,
+    file: Option<Res<TuningFile>>,
 ) {
     // In 3D the sounds go through Steam Audio's HRTF where it is there, and are panned where not.
     let emitter = (spatial.is_some() && crate::binaural::available()).then(|| Arc::new(Emitter::default()));
     let spatial = spatial.is_some() && emitter.is_none();
-    let mut voices = Vec::new();
-    let mut load = |name: &str, looping: bool| -> Option<(Handle<CleanPcm>, Option<Arc<Voice>>)> {
-        let (_, bytes) = WAVS.iter().find(|(n, _)| *n == name)?;
-        let Some((samples, 1, rate)) = parse_wav(bytes) else {
-            error!("SKATE_CLEAN_AUDIO {name}.wav is not mono 16-bit PCM");
-            return None;
-        };
-        let mut samples = samples;
-        if name == Loop::Powerslide.file() {
-            lowpass_loop(&mut samples, 1, rate as f32, SLIDE_LOWPASS_HZ);
+    let (mut voices, mut loops, mut shots) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut strips, mut buffers, mut recorded) = (Vec::new(), Vec::new(), Vec::new());
+    let mut count = 0;
+    for (k, kind) in KINDS.iter().enumerate() {
+        let strip = Arc::new(Strip::default());
+        let (mut kind_buffers, mut kind_recorded, mut handles) = (Vec::new(), Vec::new(), Vec::new());
+        for variant in 0..kind.variants {
+            let name = kind.file(variant);
+            let samples = match WAVS.iter().find(|(n, _)| *n == name).and_then(|(_, bytes)| parse_wav(bytes)) {
+                Some((mut samples, 1, RATE)) => {
+                    if name == Loop::Powerslide.file() {
+                        lowpass_loop(&mut samples, 1, RATE as f32, SLIDE_LOWPASS_HZ);
+                    }
+                    count += 1;
+                    Arc::new(samples)
+                }
+                _ => {
+                    error!("SKATE_CLEAN_AUDIO {name}.wav is not mono 16-bit PCM at {RATE} Hz");
+                    Arc::new(vec![0i16; 480])
+                }
+            };
+            let buffer = Buffer::new(samples.clone());
+            let voice = emitter.clone().map(Voice::new);
+            let handle = assets.add(CleanPcm::live(buffer.clone(), strip.clone(), RATE, kind.looping, voice.clone()));
+            kind_buffers.push(buffer);
+            kind_recorded.push(samples);
+            if kind.looping {
+                voices.push(voice);
+                // Inline-looping source played once: it never ends, and Bevy's whole-source loop
+                // (a buffering repeater) is not needed.
+                let entity = commands
+                    .spawn((
+                        AudioPlayer(handle),
+                        PlaybackSettings::ONCE.with_volume(Volume::Linear(0.0)).with_spatial(spatial),
+                        Transform::default(),
+                    ))
+                    .id();
+                loops.push((Loop::ALL[k], entity, 0.0));
+            } else {
+                handles.push(handle);
+            }
         }
-        let voice = emitter.clone().map(Voice::new);
-        Some((assets.add(CleanPcm::new(Arc::new(samples), rate, looping, voice.clone())), voice))
-    };
-    let mut loops = Vec::new();
-    for kind in Loop::ALL {
-        if let Some((handle, voice)) = load(kind.file(), true) {
-            voices.push(voice);
-            // Inline-looping source played once: it never ends, and Bevy's whole-source loop
-            // (a buffering repeater) is not needed.
-            let entity = commands
-                .spawn((
-                    AudioPlayer(handle),
-                    PlaybackSettings::ONCE
-                        .with_volume(Volume::Linear(0.0))
-                        .with_spatial(spatial),
-                    Transform::default(),
-                ))
-                .id();
-            loops.push((kind, entity, 0.0));
+        if !kind.looping {
+            shots.push((Shot::ALL[k - Loop::ALL.len()], handles));
         }
-    }
-    let mut shots = Vec::new();
-    let mut count = loops.len();
-    for shot in Shot::ALL {
-        let prefix = shot.prefix();
-        let variants: Vec<_> = WAVS
-            .iter()
-            .filter(|(n, _)| {
-                *n == prefix
-                    || n.strip_prefix(prefix)
-                        .and_then(|rest| rest.strip_prefix('_'))
-                        .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
-            })
-            .filter_map(|(n, _)| load(n, false).map(|(handle, _)| handle))
-            .collect();
-        count += variants.len();
-        shots.push((shot, variants));
+        strips.push(strip);
+        buffers.push(kind_buffers);
+        recorded.push(kind_recorded);
     }
     info!("SKATE_CLEAN_AUDIO loaded {count} sounds (spatial={spatial} hrtf={})", emitter.is_some());
+    commands.insert_resource(SoundLab::load(file.map(|f| f.0.clone())));
     commands.insert_resource(CleanAudio {
         spatial,
         emitter,
         voices,
+        strips,
+        buffers,
+        recorded,
+        wood_loop: false,
         source: Vec3::ZERO,
         shots,
         loops,
@@ -464,6 +478,16 @@ fn setup(
 }
 
 impl CleanAudio {
+    /// The loop under the wheels and its pitch: on a wooden ramp the smooth loop played lower
+    /// (the wood recording is a creaking board), or the synthesised wood loop where that is on.
+    fn rolling(&self, on_wood: bool, pitch: f32) -> (Loop, f32) {
+        match (on_wood, self.wood_loop) {
+            (true, true) => (Loop::RollWood, pitch),
+            (true, false) => (Loop::RollSmooth, pitch * WOOD_PITCH),
+            _ => (Loop::RollSmooth, pitch),
+        }
+    }
+
     fn random(&mut self) -> f32 {
         // xorshift32: plenty for picking variants.
         let mut x = self.rng;
@@ -653,8 +677,7 @@ fn observe(
         // metal loops are loaded for maps whose materials get mapped later.
         // On a wooden ramp the wheels sound lower, not different: the wood recording
         // (`roll_wood`) is a creaking board, a steady squeak under every roll.
-        let kind = Loop::RollSmooth;
-        let pitch = if hints.on_wood(position) { pitch * WOOD_PITCH } else { pitch };
+        let (kind, pitch) = audio.rolling(hints.on_wood(position), pitch);
         let surface = obs.wheel_surface & 0x7F;
         if audio.seen_surfaces & (1u128 << surface) == 0 {
             audio.seen_surfaces |= 1u128 << surface;
@@ -682,6 +705,210 @@ fn frontend(
     }
 }
 
+// ---------------------------------------------------------------- the sound lab
+
+/// A held loop's level in the lab, of a loop's full level; a hit's when it is played there.
+const AUDITION_LEVEL: f32 = 0.8;
+/// How often a held hit is played, seconds.
+const AUDITION_EVERY_S: f32 = 0.9;
+/// A sound is made again this long after its values were last changed, seconds.
+const REMAKE_AFTER_S: f32 = 0.15;
+/// The tuning is saved this long after the last change, seconds.
+const SAVE_AFTER_S: f32 = 1.0;
+const TUNING_FILE: &str = "sound-tuning.json";
+/// The tuning the app is built with: `sound-tuning.json` from a headset, kept beside the sounds.
+const BAKED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/clean-audio/tuning.json"));
+
+/// Where the tuning is kept (`sound-tuning.json` in this directory). Without it, `SK8_SOUND_TUNING`
+/// names the file, or nothing is saved.
+#[derive(Resource, Clone)]
+pub(crate) struct TuningFile(pub std::path::PathBuf);
+
+type Made = (usize, u32, Vec<Arc<Vec<i16>>>);
+
+/// Every kind of sound as tuned ([`KINDS`]' order), and what the sound lab's panel
+/// (`xr::ui::sound_lab`) is doing: which is selected, soloed, held playing.
+#[derive(Resource)]
+pub(crate) struct SoundLab {
+    tunes: Vec<Tune>,
+    pub selected: usize,
+    /// Only the selected kind is heard.
+    pub solo: bool,
+    /// The selected kind keeps playing: a loop held on, a hit again and again.
+    pub audition: bool,
+    /// The pitch a held loop plays at (the game plays loops at 0.85 to 1.2 by speed).
+    pub pitch: f32,
+    play: bool,
+    path: Option<std::path::PathBuf>,
+    now: f32,
+    last_played: f32,
+    save_wanted: Option<f32>,
+    /// Since when each kind has wanted making again, and the count of its changes.
+    remake: Vec<Option<f32>>,
+    changes: Vec<u32>,
+    making: Vec<bool>,
+    /// Whether each kind's sounds are synthesised ones as they stand.
+    synthesised: Vec<bool>,
+    made: (std::sync::mpsc::Sender<Made>, std::sync::Mutex<std::sync::mpsc::Receiver<Made>>),
+}
+
+impl SoundLab {
+    fn load(directory: Option<std::path::PathBuf>) -> Self {
+        let path = directory.map(|d| d.join(TUNING_FILE)).or_else(|| std::env::var_os("SK8_SOUND_TUNING").map(Into::into));
+        let mut tuning: Tuning = serde_json::from_str(BAKED).unwrap_or_else(|e| {
+            error!("SOUND LAB the built-in tuning doesn't parse: {e}");
+            Tuning::default()
+        });
+        if let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok()) {
+            match serde_json::from_slice::<Tuning>(&bytes) {
+                Ok(saved) => {
+                    info!("SOUND LAB loaded {} ({} sounds tuned)", path.as_ref().unwrap().display(), saved.sounds.len());
+                    tuning.sounds.extend(saved.sounds);
+                }
+                Err(e) => warn!("SOUND LAB ignoring {}: {e}", path.as_ref().unwrap().display()),
+            }
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let tunes: Vec<Tune> = KINDS.iter().map(|kind| tuning.sounds.get(kind.name).cloned().unwrap_or_default()).collect();
+        Self {
+            remake: tunes.iter().map(|tune| tune.synth.then_some(f32::MIN)).collect(),
+            tunes,
+            selected: 0,
+            solo: false,
+            audition: false,
+            pitch: 1.0,
+            play: false,
+            path,
+            now: 0.0,
+            last_played: 0.0,
+            save_wanted: None,
+            changes: vec![0; KINDS.len()],
+            making: vec![false; KINDS.len()],
+            synthesised: vec![false; KINDS.len()],
+            made: (sender, std::sync::Mutex::new(receiver)),
+        }
+    }
+
+    pub(crate) fn tune(&self, kind: usize) -> &Tune {
+        &self.tunes[kind]
+    }
+
+    /// Where the tuning is saved, if anywhere.
+    pub(crate) fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+
+    /// A generator value of a kind: as tuned, else its default.
+    pub(crate) fn value(&self, kind: usize, param: usize) -> f32 {
+        let (k, tune) = (&KINDS[kind], &self.tunes[kind]);
+        tune.params.get(k.params[param].key).copied().unwrap_or(k.defaults[param]).clamp(k.params[param].min, k.params[param].max)
+    }
+
+    /// Change a kind's tuning: saved, and its sounds made again if what they are made from changed.
+    pub(crate) fn edit(&mut self, kind: usize, f: impl FnOnce(&mut Tune)) {
+        let before = self.tunes[kind].clone();
+        f(&mut self.tunes[kind]);
+        let after = &self.tunes[kind];
+        if *after == before {
+            return;
+        }
+        self.save_wanted = Some(self.now);
+        if after.synth && (!before.synth || after.params != before.params) {
+            self.remake[kind] = Some(self.now);
+            self.changes[kind] += 1;
+        }
+    }
+
+    pub(crate) fn set_value(&mut self, kind: usize, param: usize, value: f32) {
+        let (key, default) = (KINDS[kind].params[param].key, KINDS[kind].defaults[param]);
+        self.edit(kind, |tune| {
+            if (value - default).abs() <= 1e-6 * default.abs().max(1.0) {
+                tune.params.remove(key);
+            } else {
+                tune.params.insert(key.to_string(), value);
+            }
+        });
+    }
+
+    /// Play the selected hit once.
+    pub(crate) fn play_once(&mut self) {
+        self.play = true;
+    }
+
+    /// The file's contents: the kinds that are not as they come.
+    fn tuning(&self) -> Tuning {
+        let sounds = KINDS.iter().zip(&self.tunes).filter(|(_, tune)| **tune != Tune::default()).map(|(kind, tune)| (kind.name.to_string(), tune.clone()));
+        Tuning { sounds: sounds.collect() }
+    }
+}
+
+/// The tuning into what plays: levels and EQs, synthesised sounds made (off the frame) and put in
+/// place, the selected hit played, the file saved.
+fn lab(mut commands: Commands, audio: Option<ResMut<CleanAudio>>, lab: Option<ResMut<SoundLab>>, time: Res<Time<bevy::time::Real>>) {
+    let (Some(mut audio), Some(mut lab)) = (audio, lab) else { return };
+    let lab = &mut *lab;
+    let now = time.elapsed_secs();
+    lab.now = now;
+    for (k, tune) in lab.tunes.iter().enumerate() {
+        let heard = !lab.solo || k == lab.selected;
+        let level = if heard { 10f32.powf(tune.level_db / 20.0) } else { 0.0 };
+        audio.strips[k].set(level, tune.eq);
+    }
+    audio.wood_loop = lab.tunes[Loop::ALL.iter().position(|&l| l == Loop::RollWood).unwrap_or(0)].synth;
+    // What was made since the last frame, unless its values have changed again since.
+    let made: Vec<Made> = lab.made.1.lock().map(|receiver| receiver.try_iter().collect()).unwrap_or_default();
+    for (k, change, variants) in made {
+        lab.making[k] = false;
+        if lab.tunes[k].synth && change == lab.changes[k] {
+            for (buffer, samples) in audio.buffers[k].iter().zip(variants) {
+                buffer.set(samples);
+            }
+            lab.synthesised[k] = true;
+            lab.remake[k] = None;
+        }
+    }
+    for (k, kind) in KINDS.iter().enumerate() {
+        if !lab.tunes[k].synth {
+            if std::mem::take(&mut lab.synthesised[k]) {
+                for (buffer, samples) in audio.buffers[k].iter().zip(&audio.recorded[k]) {
+                    buffer.set(samples.clone());
+                }
+            }
+            lab.remake[k] = None;
+        } else if !lab.making[k] && lab.remake[k].is_some_and(|since| now - since >= REMAKE_AFTER_S) {
+            lab.making[k] = true;
+            let values: Vec<f32> = (0..kind.params.len()).map(|p| lab.value(k, p)).collect();
+            let (change, sender) = (lab.changes[k], lab.made.0.clone());
+            let work = move || {
+                let variants = (0..kind.variants).map(|variant| Arc::new(kind.render(&values, variant))).collect();
+                let _ = sender.send((k, change, variants));
+            };
+            if let Err(e) = std::thread::Builder::new().name("sound-lab".into()).spawn(work) {
+                error!("SOUND LAB could not make {}: {e}", kind.name);
+                lab.making[k] = false;
+                lab.remake[k] = None;
+            }
+        }
+    }
+    // The selected hit: once when asked, or again and again while held.
+    if let Some(&shot) = lab.selected.checked_sub(Loop::ALL.len()).and_then(|i| Shot::ALL.get(i)) {
+        if std::mem::take(&mut lab.play) || (lab.audition && now - lab.last_played >= AUDITION_EVERY_S) {
+            lab.last_played = now;
+            audio.play(&mut commands, shot, AUDITION_LEVEL);
+        }
+    }
+    lab.play = false;
+    if lab.save_wanted.is_some_and(|since| now - since >= SAVE_AFTER_S) {
+        lab.save_wanted = None;
+        if let Some(path) = &lab.path {
+            match serde_json::to_string_pretty(&lab.tuning()).map_err(|e| e.to_string()).and_then(|json| std::fs::write(path, json + "\n").map_err(|e| e.to_string())) {
+                Ok(()) => info!("SOUND LAB saved {}", path.display()),
+                Err(e) => warn!("SOUND LAB could not save {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
 fn mix(
     audio: Option<ResMut<CleanAudio>>,
     mut sinks: Query<&mut AudioSink>,
@@ -689,8 +916,11 @@ fn mix(
     time: Res<Time<bevy::time::Real>>,
     listener: Query<&Transform, With<bevy::audio::SpatialListener>>,
     scale: Res<bevy::audio::DefaultSpatialScale>,
+    lab: Option<Res<SoundLab>>,
 ) {
     let Some(mut audio) = audio else { return };
+    // The sound lab holds the loop being tuned on, whatever the skater is doing.
+    let held = lab.filter(|lab| lab.audition && lab.selected < Loop::ALL.len()).map(|lab| (lab.selected, lab.pitch));
     // Through the HRTF: where the skater is from the head, and as loud as the panned sounds were
     // at that distance (full level within one spatial unit, the inverse square beyond it).
     if let (Some(emitter), Ok(head)) = (&audio.emitter, listener.single()) {
@@ -705,6 +935,7 @@ fn mix(
     for (i, (_, entity, volume)) in audio.loops.iter_mut().enumerate() {
         let (target, pitch) = targets[i];
         let target = if paused { 0.0 } else { target };
+        let (target, pitch) = if held.is_some_and(|(k, _)| k == i) { (AUDITION_LEVEL, held.map_or(1.0, |h| h.1)) } else { (target, pitch) };
         *volume += (target - *volume) * blend;
         let level = Volume::Linear(*volume * LOOP_GAIN * MASTER);
         let speed = pitch.clamp(0.5, 2.0);
@@ -765,6 +996,48 @@ mod tests {
             assert_eq!((channels, rate), (1, 48_000), "{name}");
             assert!(samples.len() > 1000, "{name}");
         }
+    }
+
+    #[test]
+    fn the_kinds_are_the_drivers_own_and_each_has_its_recordings() {
+        assert_eq!(KINDS.len(), Loop::ALL.len() + Shot::ALL.len());
+        for (kind, sound) in KINDS.iter().zip(Loop::ALL) {
+            assert!(kind.looping && kind.name == sound.file(), "{}", kind.name);
+        }
+        for (kind, shot) in KINDS[Loop::ALL.len()..].iter().zip(Shot::ALL) {
+            assert!(!kind.looping && kind.name == shot.prefix(), "{}", kind.name);
+        }
+        let mut files = 0;
+        for kind in &KINDS {
+            for variant in 0..kind.variants {
+                assert!(WAVS.iter().any(|(name, _)| *name == kind.file(variant)), "{}", kind.file(variant));
+                files += 1;
+            }
+        }
+        assert_eq!(files, WAVS.len());
+    }
+
+    #[test]
+    fn the_lab_keeps_what_is_tuned_and_only_that() {
+        let mut lab = SoundLab::load(None);
+        lab.path = None;
+        assert_eq!(lab.tuning(), serde_json::from_str::<Tuning>(BAKED).unwrap());
+        let pop = KINDS.iter().position(|k| k.name == "pop").unwrap();
+        let click = KINDS[pop].params.iter().position(|p| p.key == "click").unwrap();
+        lab.now = 5.0;
+        lab.edit(pop, |tune| tune.synth = true);
+        lab.set_value(pop, click, 0.5);
+        lab.edit(pop, |tune| tune.eq[1].gain = -6.0);
+        assert_eq!(lab.value(pop, click), 0.5);
+        assert_eq!((lab.remake[pop], lab.changes[pop]), (Some(5.0), 2), "made again for the source and the value, not the EQ");
+        let saved = lab.tuning();
+        assert_eq!(saved.sounds["pop"].params["click"], 0.5);
+        assert_eq!(saved.sounds["pop"].eq[1].gain, -6.0);
+        // Back at its default, a value is no longer in the file.
+        lab.set_value(pop, click, KINDS[pop].defaults[click]);
+        assert!(lab.tuning().sounds["pop"].params.is_empty());
+        lab.edit(pop, |tune| *tune = Tune::default());
+        assert!(!lab.tuning().sounds.contains_key("pop"));
     }
 
     #[test]

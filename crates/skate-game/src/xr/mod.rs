@@ -104,6 +104,7 @@ impl Plugin for XrPlugin {
                 .insert_resource(ui::ControlsSheet(retail_controls()));
         }
         app.insert_resource(XrFiles(self.files.clone()))
+            .insert_resource(crate::skate_audio::clean::TuningFile(self.files.clone()))
             .insert_resource(ui::pages::UiTier { retail: self.retail })
             .add_plugins((
                 ar_settings::ArSettingsPlugin,
