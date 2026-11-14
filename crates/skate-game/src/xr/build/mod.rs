@@ -2523,7 +2523,7 @@ mod tests {
         // A drawn rail from one pad to another, its points on their tops: the post between them,
         // over the drop, goes; the ones over the pads stay.
         let pad = |id, x: f32| {
-            let node = |dx: f32, dz: f32| drawn::Node::new(Vec3::new(dx, 1.0, dz), 0.0);
+            let node = |dx: f32, dz: f32| drawn::Node { corner: true, ..drawn::Node::new(Vec3::new(dx, 1.0, dz), 0.0) };
             Placed { path: Some(drawn::Path { nodes: vec![node(-1.5, -1.5), node(1.5, -1.5), node(1.5, 1.5), node(-1.5, 1.5)], ..default() }), ..item(id, PieceKind::Pad, [x, 0.0, 30.0]) }
         };
         let node = |x: f32| drawn::Node::new(Vec3::new(x, 1.0, 0.0), 1.0);
