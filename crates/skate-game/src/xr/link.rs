@@ -31,6 +31,9 @@ pub(crate) struct ArWorld {
     pub room_quads: Vec<[Vec3; 4]>,
     /// Room-mesh triangles not covered by a plane or box.
     pub room_triangles: Vec<[Vec3; 3]>,
+    /// Where the room's level faces are opened over a sunk piece (a bowl):
+    /// the piece, and the rectangle at its rim.
+    pub holes: Vec<(u64, [Vec3; 4])>,
     /// Grindable furniture edges.
     pub room_edges: Vec<(Vec3, Vec3)>,
     pub pieces: Vec<PieceSurfaces>,

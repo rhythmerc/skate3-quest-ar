@@ -116,6 +116,7 @@ mod tests {
                         crate::xr::build::pieces::drawn::Node { corner: true, bend: [0.2, -0.1], ..crate::xr::build::pieces::drawn::Node::new(Vec3::new(2.0, 0.5, 1.0), 0.1) },
                     ],
                     eased: true,
+                    floating: true,
                 }),
             }],
             scale: Some(8.0),

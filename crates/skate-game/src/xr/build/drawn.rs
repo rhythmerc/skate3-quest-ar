@@ -28,6 +28,8 @@ const DECK_WIDTH: f32 = 2.0;
 const BOWL_DEPTH: f32 = 1.2;
 /// A side this far above its surface is a ledge: grindable, climbable.
 const LEDGE: f32 = 0.25;
+/// How thick a deck or pad is when it floats (it has no base down to its surface).
+const SLAB: f32 = 0.12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Node {
@@ -61,6 +63,10 @@ pub(crate) struct Path {
     /// going straight (a bank).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub eased: bool,
+    /// It has no base down to the surface under it: a rail without posts, a
+    /// deck or pad that is only a slab, to be built in the air.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub floating: bool,
 }
 
 /// A point along a path: where, and the surface's height under it.
@@ -79,6 +85,11 @@ impl PieceKind {
     /// Its points are an outline, not a line.
     pub(crate) fn closed(self) -> bool {
         matches!(self, Self::Pad | Self::Pool)
+    }
+
+    /// Can be left without its base ([`Path::floating`]).
+    pub(crate) fn floats(self) -> bool {
+        matches!(self, Self::RailPath | Self::Deck | Self::Pad)
     }
 
     /// The fewest nodes it can have.
@@ -180,6 +191,7 @@ impl Path {
             n.corner.hash(&mut h);
         }
         self.eased.hash(&mut h);
+        self.floating.hash(&mut h);
         h.finish()
     }
 
@@ -192,7 +204,7 @@ impl Path {
             PieceKind::Pad => vec![node(-1.8, 0.5, -1.0), node(1.6, 0.5, -1.4), node(2.2, 0.5, 0.9), node(-0.4, 0.5, 1.6)],
             _ => vec![node(-2.0, 0.0, -1.2), node(1.8, 0.0, -1.6), node(2.4, 0.0, 1.0), node(-0.6, 0.0, 1.8), node(-2.6, 0.0, 0.6)],
         };
-        Self { nodes, eased: false }
+        Self { nodes, ..default() }
     }
 
     /// The piece: what is ridden and drawn.
@@ -205,8 +217,8 @@ impl Path {
         let line = self.line(closed);
         match piece.kind {
             PieceKind::RailPath => rail(&mut g, self, &line),
-            PieceKind::Deck => deck(&mut g, &line, DECK_WIDTH * piece.width.clamp(MIN_SIZE, MAX_SIZE)),
-            PieceKind::Pad => pad(&mut g, &line),
+            PieceKind::Deck => deck(&mut g, &line, DECK_WIDTH * piece.width.clamp(MIN_SIZE, MAX_SIZE), self.floating),
+            PieceKind::Pad => pad(&mut g, &line, self.floating),
             _ => bowl(&mut g, &line, BOWL_DEPTH * piece.size.clamp(MIN_SIZE, MAX_SIZE)),
         }
         g
@@ -257,6 +269,9 @@ fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
             posts.push(path.along(i, 0.5, false, true));
         }
     }
+    if path.floating {
+        posts.clear();
+    }
     for post in posts {
         let (p, top) = (post.p, post.p.y + RAIL_TOP - TUBE);
         if top > post.base {
@@ -266,7 +281,7 @@ fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
     g.rails.push(top);
 }
 
-fn deck(g: &mut PieceGeometry, line: &[Sample], width: f32) {
+fn deck(g: &mut PieceGeometry, line: &[Sample], width: f32, floating: bool) {
     let n = line.len();
     // Each point's direction over the ground, and its two edges.
     let heading = |i: usize| {
@@ -288,10 +303,15 @@ fn deck(g: &mut PieceGeometry, line: &[Sample], width: f32) {
             sides[side].push(at);
         }
     }
-    let down = |p: Vec3, i: usize| p.with_y(line[i].base.min(p.y));
+    let down = |p: Vec3, i: usize| p.with_y(if floating { p.y - SLAB } else { line[i].base.min(p.y) });
+    // (all of a floating deck stands clear)
+    let clear = |i: usize| floating || line[i].p.y - line[i].base > LEDGE;
     for i in 0..n - 1 {
         let (l0, l1, r0, r1) = (sides[0][i], sides[0][i + 1], sides[1][i], sides[1][i + 1]);
         push(&mut g.quads, [l0, r0, r1, l1], Vec3::Y);
+        if floating {
+            push(&mut g.quads, [down(l0, i), down(r0, i), down(r1, i + 1), down(l1, i + 1)], Vec3::NEG_Y);
+        }
         let forward = heading(i);
         let left = Vec3::Y.cross(forward);
         push(&mut g.quads, [l0, l1, down(l1, i + 1), down(l0, i)], left);
@@ -300,7 +320,7 @@ fn deck(g: &mut PieceGeometry, line: &[Sample], width: f32) {
     for (i, out) in [(0, -heading(0)), (n - 1, heading(n - 1))] {
         let (l, r) = (sides[0][i], sides[1][i]);
         push(&mut g.quads, [l, r, down(r, i), down(l, i)], out);
-        if line[i].p.y - line[i].base > LEDGE {
+        if clear(i) {
             g.edges.push((l, r));
         }
     }
@@ -308,7 +328,7 @@ fn deck(g: &mut PieceGeometry, line: &[Sample], width: f32) {
     for side in &sides {
         let mut run: Vec<Vec3> = Vec::new();
         for i in 0..=n {
-            if i < n && line[i].p.y - line[i].base > LEDGE {
+            if i < n && clear(i) {
                 run.push(side[i]);
                 continue;
             }
@@ -376,10 +396,10 @@ fn level(out: &mut Vec<[Vec3; 4]>, corners: &[Vec3]) {
     }
 }
 
-fn pad(g: &mut PieceGeometry, line: &[Sample]) {
+fn pad(g: &mut PieceGeometry, line: &[Sample], floating: bool) {
     let (middle, ring) = outline(line);
     let top = ring[0].y;
-    let base = line.iter().map(|s| s.base).fold(f32::MAX, f32::min).min(top);
+    let base = if floating { top - SLAB } else { line.iter().map(|s| s.base).fold(f32::MAX, f32::min).min(top) };
     let ring: Vec<Vec3> = ring.iter().map(|p| p.with_y(top)).collect();
     let middle = middle.with_y(top);
     fan(&mut g.quads, middle, &ring);
@@ -389,7 +409,14 @@ fn pad(g: &mut PieceGeometry, line: &[Sample]) {
         push(&mut g.quads, [a, b, b.with_y(base), a.with_y(base)], (a + b) * 0.5 - middle);
         g.edges.push((a, b));
     }
-    if top - base > LEDGE {
+    if floating {
+        // Its underside (the fan again, facing down).
+        let under: Vec<Vec3> = ring.iter().map(|p| p.with_y(base)).collect();
+        for j in (0..n).step_by(2) {
+            push(&mut g.quads, [middle.with_y(base), under[j], under[(j + 1) % n], under[(j + 2) % n]], Vec3::NEG_Y);
+        }
+    }
+    if floating || top - base > LEDGE {
         g.rails.push(ring.iter().copied().chain([ring[0]]).collect());
     }
 }
@@ -483,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_path_runs_through_its_nodes_and_its_bend_handle() {
-        let mut path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.5, 0.0), node(3.0, 0.5, 4.0)], eased: false };
+        let mut path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.5, 0.0), node(3.0, 0.5, 4.0)], ..default() };
         for (i, n) in path.nodes.iter().enumerate().take(2) {
             assert!(path.along(i, 0.0, false, true).p.distance(n.p()) < 1e-5);
             assert!(path.along(i, 1.0, false, true).p.distance(path.nodes[i + 1].p()) < 1e-5);
@@ -502,11 +529,12 @@ mod tests {
         path.nodes[1].bend = [0.0; 2];
         assert!((path.heading(1, true, false) - Vec2::Y).length() < 1e-5 && (path.heading(1, false, false) - Vec2::X).length() < 1e-5);
         assert_ne!(path.key(), Path { eased: false, ..path.clone() }.key());
+        assert_ne!(path.key(), Path { floating: true, ..path.clone() }.key());
     }
 
     #[test]
     fn a_rail_is_a_tube_over_its_nodes_on_posts_down_to_the_surface() {
-        let mut path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.0, 0.0), node(6.0, 1.0, 1.0)], eased: false };
+        let mut path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.0, 0.0), node(6.0, 1.0, 1.0)], ..default() };
         path.nodes[2].base = 0.4;
         let g = path.geometry(Piece::new(PieceKind::RailPath));
         let line = &g.rails[0];
@@ -523,11 +551,11 @@ mod tests {
     #[test]
     fn a_rail_has_no_faces_across_it_but_its_two_ends() {
         // Straight, level: nothing faces along it between x = 0 and 6.
-        let straight = Path { nodes: vec![node(0.0, 0.0, 0.0), node(6.0, 0.0, 0.0)], eased: false };
+        let straight = Path { nodes: vec![node(0.0, 0.0, 0.0), node(6.0, 0.0, 0.0)], ..default() };
         let g = straight.geometry(Piece::new(PieceKind::RailPath));
         assert_eq!(g.rail_quads.len(), 6, "one box");
         // Bent and rising: still only the two ends face along the rail.
-        let mut bent = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.0, 0.0), node(6.0, 1.0, 2.0), node(9.0, 1.0, 2.0)], eased: false };
+        let mut bent = Path { nodes: vec![node(0.0, 0.0, 0.0), node(3.0, 0.0, 0.0), node(6.0, 1.0, 2.0), node(9.0, 1.0, 2.0)], ..default() };
         bent.nodes[1].bend = [0.3, 0.4];
         let g = bent.geometry(Piece::new(PieceKind::RailPath));
         let line = &g.rails[0];
@@ -557,7 +585,7 @@ mod tests {
 
     #[test]
     fn a_deck_is_as_wide_as_asked_solid_to_the_surface_and_faces_out() {
-        let path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(4.0, 1.0, 0.0), node(8.0, 1.0, 2.0)], eased: false };
+        let path = Path { nodes: vec![node(0.0, 0.0, 0.0), node(4.0, 1.0, 0.0), node(8.0, 1.0, 2.0)], ..default() };
         let piece = Piece { width: 1.5, ..Piece::new(PieceKind::Deck) };
         let g = path.geometry(piece);
         let (lo, hi) = g.bounds();
@@ -577,9 +605,47 @@ mod tests {
         let ends = path.ends(piece);
         assert!(ends[0].1.distance(Vec3::NEG_X) < 1e-4 && ends[1].1.x > 0.5 && (ends[0].2 - 3.0).abs() < 1e-5);
         // A turn tighter than its width doesn't fold its inside edge back.
-        let tight = Path { nodes: vec![node(0.0, 0.5, 0.0), node(1.0, 0.5, 0.0), node(1.0, 0.5, 1.0)], eased: false };
+        let tight = Path { nodes: vec![node(0.0, 0.5, 0.0), node(1.0, 0.5, 0.0), node(1.0, 0.5, 1.0)], ..default() };
         let g = tight.geometry(Piece { width: 2.5, ..Piece::new(PieceKind::Deck) });
         assert!(g.all_quads().flatten().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn floating_a_rail_has_no_posts_and_a_deck_or_pad_is_a_slab_with_an_underside() {
+        let facing = |q: &[Vec3; 4]| (quad_normal(q) + (q[3] - q[0]).cross(q[2] - q[0])).normalize();
+        let mut rail = Path { nodes: vec![node(0.0, 2.0, 0.0), node(3.0, 2.0, 0.0), node(6.0, 3.0, 1.0)], ..default() };
+        assert!(!rail.geometry(Piece::new(PieceKind::RailPath)).quads.is_empty());
+        rail.floating = true;
+        let g = rail.geometry(Piece::new(PieceKind::RailPath));
+        assert!(g.quads.is_empty() && g.post_places().is_empty() && g.rails.len() == 1 && !g.rail_quads.is_empty());
+
+        // A deck 2 to 3 m up: on the ground it is solid down to it; floating, a slab.
+        let mut deck = Path { nodes: vec![node(0.0, 2.0, 0.0), node(4.0, 3.0, 0.0), node(8.0, 3.0, 2.0)], ..default() };
+        assert!(deck.geometry(Piece::new(PieceKind::Deck)).bounds().0.y.abs() < 1e-5);
+        deck.floating = true;
+        let g = deck.geometry(Piece::new(PieceKind::Deck));
+        assert!((g.bounds().0.y - (2.0 - SLAB)).abs() < 1e-4 && (g.bounds().1.y - 3.0).abs() < 1e-4, "{:?}", g.bounds());
+        let (up, down) = (g.quads.iter().filter(|q| facing(q).y > 0.7).count(), g.quads.iter().filter(|q| facing(q).y < -0.7).count());
+        assert!(up >= 10 && up == down, "{up} up, {down} down");
+        // Each underside is under its top, a slab below.
+        for q in g.quads.iter().filter(|q| facing(q).y < -0.7) {
+            let middle = q.iter().sum::<Vec3>() / 4.0;
+            assert!(g.quads.iter().any(|t| facing(t).y > 0.7 && (t.iter().sum::<Vec3>() / 4.0 - middle - Vec3::Y * SLAB).length() < 1e-3));
+        }
+        assert_eq!(g.rails.len(), 2, "both sides are ledges all along");
+        real_triangles(&g, "a floating deck");
+
+        let mut pad = Path::sample_of(PieceKind::Pad);
+        for n in &mut pad.nodes {
+            n.at[1] = 2.0;
+        }
+        pad.floating = true;
+        let g = pad.geometry(Piece::new(PieceKind::Pad));
+        assert!((g.bounds().0.y - (2.0 - SLAB)).abs() < 1e-4 && g.rails.len() == 1);
+        assert_eq!(g.quads.iter().filter(|q| facing(q).y > 0.7).count(), g.quads.iter().filter(|q| facing(q).y < -0.7).count());
+        real_triangles(&g, "a floating pad");
+        // A bowl is in its surface: it doesn't float.
+        assert!(!PieceKind::Pool.floats() && PieceKind::Deck.floats());
     }
 
     #[test]

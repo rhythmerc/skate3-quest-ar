@@ -391,6 +391,8 @@ struct BuildState {
     closing: bool,
     /// The height (tracking y) the next point takes; none: its surface's.
     level: Option<f32>,
+    /// The next drawn piece has no base down to its surface (`drawn::Path::floating`).
+    floating: bool,
     /// How far the stick raised the point being placed or moved this frame, m.
     rise: f32,
     /// The handle of the selected drawn piece the pointer is on, and the one held.
@@ -440,6 +442,7 @@ impl Default for BuildState {
             pending: None,
             closing: false,
             level: None,
+            floating: false,
             rise: 0.0,
             handle: None,
             handle_drag: None,
@@ -926,7 +929,10 @@ fn build_controls(
     // of any other, edge to edge at that edge's height.
     state.lift = 0.0;
     state.join = None;
-    if let Some((position, _)) = state.ghost.filter(|_| !state.free) {
+    // In the hand (free placement) it joins what the hand is near, at that
+    // height, and stays in the air there.
+    let held = state.free;
+    if let Some((position, _)) = state.ghost {
         let metres = placed.park_scale / root.scale.x;
         let moving = match placed.dragging {
             Some(id) => placed.items.iter().find(|p| p.id == id).cloned(),
@@ -953,11 +959,11 @@ fn build_controls(
                 .filter(|p| p.piece.kind == moving.piece.kind && Some(p.id) != placed.dragging)
                 .map(|p| p.footprint(metres))
                 .collect();
-            if let Some((place, yaw)) = snap::join(neighbours.iter().copied(), moving.footprint(metres)) {
+            if let Some((place, yaw)) = snap::join(neighbours.iter().copied(), moving.footprint(metres), held) {
                 state.ghost = Some((place, root.transform_point(place)));
                 state.placed_yaw = yaw;
             } else if let Some(place) =
-                Some(()).filter(|_| moving.piece.kind == PieceKind::Rail).and_then(|_| snap::join_ends(neighbours, moving.footprint(metres)))
+                Some(()).filter(|_| moving.piece.kind == PieceKind::Rail).and_then(|_| snap::join_ends(neighbours, moving.footprint(metres), held))
             {
                 // Rails also meet end to end at any angle.
                 state.ghost = Some((place, root.transform_point(place)));
@@ -976,7 +982,7 @@ fn build_controls(
                 let own = |piece: Piece| -> Vec<snap::Edge> {
                     piece.joins().iter().map(|j| snap::Edge { at: j.at * k, out: j.out, width: j.width * k }).collect()
                 };
-                let mut met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach);
+                let mut met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach, held);
                 // The next piece takes the width of the edge it joins, unless the player set its own.
                 if let (Some(found), None, false) = (met, placed.dragging, state.own_dimensions) {
                     if let Some((dimension, per)) = moving.piece.joins()[found.own].follows {
@@ -994,12 +1000,15 @@ fn build_controls(
                                     moving.piece.width = fitted;
                                 }
                             }
-                            met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach).or(met);
+                            met = snap::meet(theirs.iter().copied(), position, state.placed_yaw, &own(moving.piece), reach, held).or(met);
                         }
                     }
                 }
                 // How far above (or into) what is under it that leaves its base.
                 let joined = met.and_then(|met| {
+                    if held {
+                        return Some((met, 0.0));
+                    }
                     let above = root.transform_point(met.place.with_y(met.edge.at.y - 0.01));
                     let under = cast(&world, &placed, &root, above, root.rotation * Vec3::NEG_Y)?;
                     let lift = (met.place.y - to_tracking.transform_point3(under.point).y) / k;
@@ -1104,6 +1113,27 @@ fn build_controls(
                 return;
             }
         }
+    }
+    // A drawn rail, deck or pad: with its base down to the surface under it, or without (floating).
+    if more && pressed(now.trigger, previous.trigger) {
+        match placed.selected {
+            Some(id) => {
+                if placed.items.iter().any(|p| p.id == id && p.path.is_some() && p.piece.kind.floats()) {
+                    placed.checkpoint();
+                    if let Some(path) = placed.get_mut(id).and_then(|item| item.path.as_mut()) {
+                        path.floating = !path.floating;
+                        info!("BUILD piece {id} floating={}", path.floating);
+                    }
+                    placed.revision += 1;
+                }
+            }
+            None if PieceKind::ALL[state.selected].floats() => {
+                state.floating = !state.floating;
+                info!("BUILD next drawn piece floating={}", state.floating);
+            }
+            None => {}
+        }
+        return;
     }
     // A deck's slope: straight, or eased into a transition.
     if more && pressed(now.b, previous.b) {
@@ -1234,7 +1264,8 @@ fn build_controls(
         } else if (finish || (trigger && state.closing)) && state.draft.len() >= kind.least_nodes() {
             let first = state.draft[0];
             let origin = Vec3::new(first.at[0], first.base, first.at[2]);
-            let path = draft_path(&state.draft, None, origin, metres);
+            let mut path = draft_path(&state.draft, None, origin, metres);
+            path.floating = state.floating && kind.floats();
             let piece = state.piece();
             let finish = Some(state.finish()).filter(|&f| f != kind.finishes()[0]);
             let id = placed.add(piece, origin, 0.0, 1.0, finish, state.tint());
@@ -1313,6 +1344,16 @@ fn describe(
             next.right = vec![Row::new("Stick ↔", "colour: hue"), Row::new("Stick ↕", "colour: lighter / darker")];
             if tinted {
                 next.right.push(Row::new("Stick click", format!("{}'s own colour", finish.name())));
+            }
+            let base = |floating: bool| if floating { "base: down to the surface" } else { "base: none (it floats)" };
+            match editing {
+                Some(item) if item.piece.kind.floats() => {
+                    if let Some(path) = &item.path {
+                        next.right.push(Row::new("Trigger", base(path.floating)));
+                    }
+                }
+                None if chosen.floats() => next.right.push(Row::new("Trigger", base(state.floating))),
+                _ => {}
             }
             if let Some(item) = editing {
                 next.right.push(Row::new("A", if item.hidden { "show it again" } else { "hide it (still skated)" }));
@@ -1427,6 +1468,7 @@ fn describe(
                 Row::new(
                     "A / Trigger",
                     match (state.free, state.ghost.is_some()) {
+                        (true, _) if state.join.is_some() => "join it on there",
                         (true, _) => "put it here",
                         (false, true) if state.join.is_some() => "join it on there",
                         (false, true) => "put it there",
@@ -1471,7 +1513,7 @@ fn draft_path(draft: &[drawn::Node], pending: Option<drawn::Node>, origin: Vec3,
         .chain(pending.iter())
         .map(|n| drawn::Node::new((Vec3::from_array(n.at) - origin) / metres, (n.base - origin.y) / metres))
         .collect();
-    drawn::Path { nodes, eased: false }
+    drawn::Path { nodes, ..default() }
 }
 
 /// Moves a handle of a drawn piece: a point to `to` (the piece's own
@@ -1641,6 +1683,12 @@ fn cast_past(
     };
     for [a, b, c] in world.room() {
         consider(ray_triangle(origin, direction, a, b, c), (b - a).cross(c - a), None);
+    }
+    // A bowl being moved (or seen past) has left the surface open where it was until the
+    // collision is made again: the pointer lands on that surface still.
+    for (_, [a, b, c, d]) in world.holes.iter().filter(|(id, _)| Some(*id) == placed.dragging || Some(*id) == past) {
+        consider(ray_triangle(origin, direction, *a, *b, *c), (*b - *a).cross(*c - *a), None);
+        consider(ray_triangle(origin, direction, *a, *c, *d), (*c - *a).cross(*d - *a), None);
     }
     for item in placed.items.iter().filter(|p| Some(p.id) != placed.dragging && Some(p.id) != past) {
         let at = item.world_transform(root, placed.park_scale);
@@ -2261,7 +2309,8 @@ fn show_drawn(
             shown.extend(state.pending.iter().map(|n| (Vec3::from_array(n.at) + up, 4, 1.0)));
             if let Some(first) = state.draft.first() {
                 let origin = Vec3::new(first.at[0], first.base, first.at[2]);
-                let path = draft_path(&state.draft, state.pending, origin, metres);
+                let mut path = draft_path(&state.draft, state.pending, origin, metres);
+                path.floating = state.floating && kind.floats();
                 // (a bowl is shown by its points alone: filled in as it is drawn, its preview
                 // jumps about with every point)
                 if path.nodes.len() >= kind.least_nodes() && kind != PieceKind::Pool {
@@ -2418,6 +2467,23 @@ fn icon_extent(kind: PieceKind) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bowl_being_moved_can_be_put_back_where_it_was() {
+        // The floor is open over the bowl (piece 7): nothing of it is left there to point at.
+        let hole = [Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 0.0, -2.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(-2.0, 0.0, 2.0)];
+        let world = ArWorld { holes: vec![(7, hole)], ..default() };
+        let mut placed = PlacedPieces::default();
+        let (from, down) = (Vec3::new(0.5, 3.0, -0.5), Vec3::NEG_Y);
+        assert!(cast(&world, &placed, &Transform::IDENTITY, from, down).is_none(), "the hole, while the bowl is in it");
+        // Picked up, the pointer lands on the surface it was sunk into, facing up.
+        placed.dragging = Some(7);
+        let hit = cast(&world, &placed, &Transform::IDENTITY, from, down).expect("the surface where the bowl was");
+        assert!(hit.point.distance(Vec3::new(0.5, 0.0, -0.5)) < 1e-4 && hit.normal.y > 0.99 && hit.piece.is_none());
+        // Another bowl's hole stays a hole.
+        placed.dragging = Some(8);
+        assert!(cast(&world, &placed, &Transform::IDENTITY, from, down).is_none());
+    }
 
     #[test]
     fn a_rail_has_no_posts_in_a_bowl() {

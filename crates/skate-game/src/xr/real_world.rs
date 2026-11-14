@@ -116,16 +116,17 @@ fn rebuild_collision(
     let room_quads: Vec<[Vec3; 4]> = quads.into_iter().map(|q| q.map(to_world)).collect();
     let room_triangles: Vec<[Vec3; 3]> = triangles.into_iter().map(|t| t.map(to_world)).collect();
     // A bowl is ridden below the surface it is sunk into, which opens over it.
-    let holes: Vec<[Vec3; 4]> = placed
+    let sunk: Vec<(u64, [Vec3; 4])> = placed
         .items
         .iter()
         .filter(|item| item.piece.kind.sunk())
         .map(|item| {
             let at = item.world_transform(&root, placed.park_scale);
             let (min, max) = item.geometry().footprint();
-            [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)].map(|(x, z)| at.transform_point(Vec3::new(x, 0.0, z)))
+            (item.id, [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)].map(|(x, z)| at.transform_point(Vec3::new(x, 0.0, z))))
         })
         .collect();
+    let holes: Vec<[Vec3; 4]> = sunk.iter().map(|(_, hole)| *hole).collect();
     let (room_quads, room_triangles) = open_over(room_quads, room_triangles, &holes, HOLE_REACH_M * root.scale.x);
     let room_edges: Vec<(Vec3, Vec3)> = real_edges.iter().map(|&(a, b)| (to_world(a), to_world(b))).collect();
     // Table and furniture tops are grindable ledges.
@@ -180,6 +181,7 @@ fn rebuild_collision(
         revision,
         room_quads,
         room_triangles,
+        holes: sunk,
         room_edges,
         pieces,
         rails,

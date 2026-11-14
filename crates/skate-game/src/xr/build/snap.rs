@@ -32,11 +32,15 @@ pub(crate) struct Footprint {
 /// Where a piece (`own`, at the pointed position and turn) goes when it is
 /// near enough a place flush against one of `neighbours`: its position and
 /// turn there. The nearest such place wins.
-pub(crate) fn join(neighbours: impl IntoIterator<Item = Footprint>, own: Footprint) -> Option<(Vec3, f32)> {
+///
+/// `held`: the piece is in the hand, not on a surface (free placement). It
+/// then joins a neighbour at any height that its hand is near, and takes
+/// that height.
+pub(crate) fn join(neighbours: impl IntoIterator<Item = Footprint>, own: Footprint, held: bool) -> Option<(Vec3, f32)> {
     let reach = JOIN_REACH * (own.max - own.min).max_element();
     let mut best: Option<(f32, Vec3, f32)> = None;
     for n in neighbours {
-        if (n.position.y - own.position.y).abs() > JOIN_HEIGHT_M {
+        if (n.position.y - own.position.y).abs() > if held { reach } else { JOIN_HEIGHT_M } {
             continue;
         }
         for (turned, min, max) in [(0.0, own.min, own.max), (PI, -own.max, -own.min)] {
@@ -122,11 +126,11 @@ fn ends(f: &Footprint) -> [Vec3; 2] {
 /// End to end at any angle, for rails: where `own` goes (its turn kept) so
 /// that one of its ends meets the nearest end of one of `neighbours`, when
 /// they are already close. A run of rails can then bend.
-pub(crate) fn join_ends(neighbours: impl IntoIterator<Item = Footprint>, own: Footprint) -> Option<Vec3> {
+pub(crate) fn join_ends(neighbours: impl IntoIterator<Item = Footprint>, own: Footprint, held: bool) -> Option<Vec3> {
     let reach = END_REACH * (own.max.x - own.min.x);
     let mut best: Option<(f32, Vec3)> = None;
     for n in neighbours {
-        if (n.position.y - own.position.y).abs() > JOIN_HEIGHT_M {
+        if (n.position.y - own.position.y).abs() > if held { reach } else { JOIN_HEIGHT_M } {
             continue;
         }
         for theirs in ends(&n) {
@@ -174,7 +178,11 @@ fn turn_of(direction: Vec3) -> f32 {
 /// `reach` of there (over the ground: the piece comes up or down to it) and
 /// turned within [`JOIN_ANGLE`] of facing it. Rails' ends meet each other
 /// only, at any angle. The nearest wins.
-pub(crate) fn meet(theirs: impl IntoIterator<Item = Edge>, position: Vec3, yaw: f32, own: &[Edge], reach: f32) -> Option<Met> {
+///
+/// `held`: the piece is in the hand, not on a surface (free placement), so
+/// its own edge must be within `reach` of theirs in height too: an edge
+/// overhead or on the floor under the hand is left alone.
+pub(crate) fn meet(theirs: impl IntoIterator<Item = Edge>, position: Vec3, yaw: f32, own: &[Edge], reach: f32, held: bool) -> Option<Met> {
     let mut best: Option<(f32, Met)> = None;
     for edge in theirs {
         for (index, mine) in own.iter().enumerate() {
@@ -192,6 +200,9 @@ pub(crate) fn meet(theirs: impl IntoIterator<Item = Edge>, position: Vec3, yaw: 
             };
             let now = position + Quat::from_rotation_y(yaw) * mine.at;
             let distance = now.xz().distance(edge.at.xz());
+            if held && (now.y - edge.at.y).abs() > reach {
+                continue;
+            }
             if distance <= reach && best.is_none_or(|(d, _)| distance < d) {
                 let place = edge.at - Quat::from_rotation_y(turned) * mine.at;
                 best = Some((distance, Met { place, yaw: turned, own: index, edge }));
@@ -215,17 +226,20 @@ mod tests {
             Edge { at: Vec3::new(-2.0, 1.2, 0.0), out: Vec3::NEG_X, width: 4.0 },
             Edge { at: Vec3::new(2.0, 1.2, 0.0), out: Vec3::X, width: 4.0 },
         ];
-        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), 0.15, &platform, 1.0).expect("near enough");
+        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), 0.15, &platform, 1.0, false).expect("near enough");
         // Its +z edge on the ramp's top: its middle 2 m behind, its top level with the ramp's.
         assert!(met.place.distance(Vec3::new(1.0, 0.8 - 1.2, -4.0)) < 1e-4, "{met:?}");
         assert!(angle_between(met.yaw, 0.0).abs() < 1e-4 && met.own == 1);
         // Turned a quarter, another of its edges takes it.
-        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), FRAC_PI_2 + 0.1, &platform, 1.0).expect("near enough");
+        let met = meet([top], Vec3::new(1.2, 0.0, -4.3), FRAC_PI_2 + 0.1, &platform, 1.0, false).expect("near enough");
         assert!(angle_between(met.yaw, FRAC_PI_2).abs() < 1e-4 && met.own == 2, "{met:?}");
         assert!(met.place.distance(Vec3::new(1.0, -0.4, -4.0)) < 1e-4);
         // Too far, or turned 45 degrees: left alone.
-        assert!(meet([top], Vec3::new(1.0, 0.0, -6.0), 0.0, &platform, 1.0).is_none());
-        assert!(meet([top], Vec3::new(1.2, 0.0, -4.3), 0.8, &platform, 1.0).is_none());
+        assert!(meet([top], Vec3::new(1.0, 0.0, -6.0), 0.0, &platform, 1.0, false).is_none());
+        assert!(meet([top], Vec3::new(1.2, 0.0, -4.3), 0.8, &platform, 1.0, false).is_none());
+        // In the hand, the edge must be near in height as well: here the platform's top is 0.4 over the ramp's.
+        assert!(meet([top], Vec3::new(1.2, -0.3, -4.3), 0.15, &platform, 1.0, true).is_some());
+        assert!(meet([top], Vec3::new(1.2, 1.0, -4.3), 0.15, &platform, 1.0, true).is_none(), "held well above it");
     }
 
     #[test]
@@ -237,11 +251,11 @@ mod tests {
         ];
         let yaw = 0.9;
         let start = Quat::from_rotation_y(yaw) * rail[0].at;
-        let met = meet([end], Vec3::new(0.1, 0.0, 0.05) - start.with_y(0.0), yaw, &rail, 0.5).expect("near enough");
+        let met = meet([end], Vec3::new(0.1, 0.0, 0.05) - start.with_y(0.0), yaw, &rail, 0.5, false).expect("near enough");
         assert!((met.place + start).distance(end.at) < 1e-4 && met.yaw == yaw, "{met:?}");
         // A rail's end doesn't take a ramp's edge.
         let top = Edge { at: Vec3::ZERO, out: Vec3::X, width: 2.0 };
-        assert!(meet([top], -start, yaw, &rail, 0.5).is_none());
+        assert!(meet([top], -start, yaw, &rail, 0.5, false).is_none());
     }
 
     fn table(yaw: f32) -> SurfaceBox {
@@ -278,16 +292,16 @@ mod tests {
             let right = Quat::from_rotation_y(yaw) * Vec3::X;
             // Half a width out to its right, a little off and a little turned.
             let near = placed.position + right * 0.53 + Vec3::new(0.02, 0.0, -0.03);
-            let (place, turn) = join([placed], pipe(near, yaw + 0.2)).expect("near enough");
+            let (place, turn) = join([placed], pipe(near, yaw + 0.2), false).expect("near enough");
             assert!(place.distance(placed.position + right * 0.5) < 1e-4, "{yaw}: {place}");
             assert!(angle_between(turn, yaw).abs() < 1e-4);
             // Turned right round, it still joins, and stays turned round.
-            let (place, turn) = join([placed], pipe(near, yaw + PI - 0.1)).expect("near enough");
+            let (place, turn) = join([placed], pipe(near, yaw + PI - 0.1), false).expect("near enough");
             assert!(place.distance(placed.position + right * 0.5) < 1e-4);
             assert!(angle_between(turn, yaw + PI).abs() < 1e-4);
             // End to end.
             let ahead = Quat::from_rotation_y(yaw) * Vec3::Z;
-            let (place, _) = join([placed], pipe(placed.position + ahead * 0.95, yaw)).expect("near enough");
+            let (place, _) = join([placed], pipe(placed.position + ahead * 0.95, yaw), false).expect("near enough");
             assert!(place.distance(placed.position + ahead * 0.9) < 1e-4);
         }
     }
@@ -295,16 +309,22 @@ mod tests {
     #[test]
     fn far_turned_or_raised_copies_are_left_alone() {
         let placed = pipe(Vec3::ZERO, 0.0);
-        assert!(join([placed], pipe(Vec3::new(1.2, 0.0, 0.0), 0.0)).is_none(), "too far");
-        assert!(join([placed], pipe(Vec3::new(0.5, 0.0, 0.0), 0.8)).is_none(), "turned 45 degrees");
-        assert!(join([placed], pipe(Vec3::new(0.5, 0.4, 0.0), 0.0)).is_none(), "on a table above it");
-        assert!(join([], pipe(Vec3::ZERO, 0.0)).is_none());
+        assert!(join([placed], pipe(Vec3::new(1.2, 0.0, 0.0), 0.0), false).is_none(), "too far");
+        assert!(join([placed], pipe(Vec3::new(0.5, 0.0, 0.0), 0.8), false).is_none(), "turned 45 degrees");
+        assert!(join([placed], pipe(Vec3::new(0.5, 0.4, 0.0), 0.0), false).is_none(), "on a table above it");
+        assert!(join([], pipe(Vec3::ZERO, 0.0), false).is_none());
+        // In the hand (free placement) it joins a twin at whatever height the hand is near, and takes it.
+        let high = Footprint { position: Vec3::new(0.0, 1.5, 0.0), ..placed };
+        let (place, _) = join([high], pipe(Vec3::new(0.55, 1.4, 0.0), 0.0), true).expect("near it in the air");
+        assert!(place.distance(Vec3::new(0.5, 1.5, 0.0)) < 1e-4, "{place}");
+        assert!(join([high], pipe(Vec3::new(0.55, 1.4, 0.0), 0.0), false).is_none(), "on a surface, heights must agree");
+        assert!(join([high], pipe(Vec3::new(0.55, 0.9, 0.0), 0.0), true).is_none(), "well under it");
     }
 
     #[test]
     fn the_nearest_place_wins() {
         let (a, b) = (pipe(Vec3::ZERO, 0.0), pipe(Vec3::new(1.2, 0.0, 0.0), 0.0));
-        let (place, _) = join([a, b], pipe(Vec3::new(0.62, 0.0, 0.0), 0.0)).expect("between them");
+        let (place, _) = join([a, b], pipe(Vec3::new(0.62, 0.0, 0.0), 0.0), false).expect("between them");
         assert!(place.distance(Vec3::new(0.7, 0.0, 0.0)) < 1e-4, "{place}");
     }
 
@@ -318,11 +338,11 @@ mod tests {
             let own_yaw = placed.yaw + turn;
             let start = Quat::from_rotation_y(own_yaw) * Vec3::new(-0.25, 0.0, 0.0);
             let own = rail(end - start + Vec3::new(0.02, 0.0, 0.015), own_yaw);
-            let place = join_ends([placed], own).expect("near enough");
+            let place = join_ends([placed], own, false).expect("near enough");
             assert!((place + start).distance(end) < 1e-4, "{turn}: {place}");
         }
-        assert!(join_ends([placed], rail(end + Vec3::new(0.6, 0.0, 0.0), 1.0)).is_none(), "too far");
-        assert!(join_ends([placed], rail(end + Vec3::Y * 0.3, 1.0)).is_none(), "on another surface");
+        assert!(join_ends([placed], rail(end + Vec3::new(0.6, 0.0, 0.0), 1.0), false).is_none(), "too far");
+        assert!(join_ends([placed], rail(end + Vec3::Y * 0.3, 1.0), false).is_none(), "on another surface");
     }
 
     fn top_of(table_yaw: f32, point: Vec3) -> Vec3 {
