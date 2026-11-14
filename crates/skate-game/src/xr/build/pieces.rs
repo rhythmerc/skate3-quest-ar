@@ -311,6 +311,23 @@ pub(crate) struct PieceGeometry {
     /// A rail's posts: where each one's faces are in `quads` (the first,
     /// and how many), so the ones over a bowl can be left out.
     pub posts: Vec<(usize, usize)>,
+    /// A ramp made across its width from a profile: how it is put together,
+    /// for drawing it (`dress`).
+    pub ramp: Option<Ramp>,
+}
+
+/// How a ramp is put together.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Ramp {
+    /// Its height (y) along it (x: the piece's z), and how wide it is.
+    pub profile: Vec<Vec2>,
+    pub width: f32,
+    /// Its lips with a coping tube: where (z, y), and whether the tube is
+    /// black (rubber) and not steel.
+    pub copings: Vec<(Vec2, bool)>,
+    /// Where one plywood sheet ends and the next begins along it (z),
+    /// besides at its lips.
+    pub joints: Vec<f32>,
 }
 
 /// A rail's post: a box, kept track of in [`PieceGeometry::posts`].
@@ -527,7 +544,7 @@ impl Piece {
                 let mut profile = vec![Vec2::new(z0, radius)];
                 profile.extend(transition(z0 + deck, radius, 1.0));
                 extrude(&mut g, &profile, width);
-                coping(&mut g, z0 + deck, radius, width);
+                coping(&mut g, z0 + deck, radius, width, true);
             }
             PieceKind::HalfPipe => {
                 // (its width is the flat between its two transitions, which keep their shape)
@@ -538,8 +555,12 @@ impl Piece {
                 profile.extend(transition(half - deck, radius, -1.0).into_iter().rev());
                 profile.push(Vec2::new(half, radius));
                 extrude(&mut g, &profile, width);
-                coping(&mut g, -half + deck, radius, width);
-                coping(&mut g, half - deck, radius, width);
+                coping(&mut g, -half + deck, radius, width, false);
+                coping(&mut g, half - deck, radius, width, false);
+                // Its flat is four sheets: two side by side, twice.
+                if let Some(ramp) = g.ramp.as_mut() {
+                    ramp.joints = vec![-flat * 0.5, 0.0, flat * 0.5];
+                }
             }
             PieceKind::Rail => {
                 let (length, top, tube) = (6.0 * s, 0.5, 0.08);
@@ -613,7 +634,7 @@ impl Piece {
                 let mut profile: Vec<Vec2> = transition(0.0, radius, -1.0).into_iter().rev().collect();
                 profile.extend(transition(0.0, radius, 1.0).into_iter().skip(1));
                 extrude(&mut g, &profile, width);
-                coping(&mut g, 0.0, radius, width);
+                coping(&mut g, 0.0, radius, width, false);
             }
         }
         // A ramp joined higher up stands on a solid block down to the surface.
@@ -717,6 +738,11 @@ impl Piece {
 const MIN_BOX_M: f32 = 0.1;
 
 impl PieceKind {
+    /// A ramp built of plywood when it is in wood: pale, in sheets (`dress`).
+    pub(crate) fn plywood(self) -> bool {
+        matches!(self, Self::Kicker | Self::QuarterPipe | Self::HalfPipe | Self::Spine | Self::Bank)
+    }
+
     /// Stands on posts, which reach down when it is joined higher up.
     pub(crate) fn on_posts(self) -> bool {
         matches!(self, Self::Rail | Self::CurvedRail | Self::RailPath)
@@ -735,7 +761,10 @@ fn transition(lip_z: f32, radius: f32, dir: f32) -> Vec<Vec2> {
         .collect()
 }
 
-fn coping(g: &mut PieceGeometry, z: f32, height: f32, width: f32) {
+fn coping(g: &mut PieceGeometry, z: f32, height: f32, width: f32, black: bool) {
+    if let Some(ramp) = g.ramp.as_mut() {
+        ramp.copings.push((Vec2::new(z, height), black));
+    }
     let (a, b) = (Vec3::new(-width * 0.5, height, z), Vec3::new(width * 0.5, height, z));
     g.rails.push(vec![a, b]);
     g.edges.push((a, b));
@@ -764,6 +793,7 @@ fn grind_box(g: &mut PieceGeometry, size: Vec3, base: f32, grind: [bool; 4]) {
 /// [-width/2, width/2], solid down to y = 0. No bottom face: pieces sit on a
 /// surface.
 fn extrude(g: &mut PieceGeometry, profile: &[Vec2], width: f32) {
+    g.ramp = Some(Ramp { profile: profile.to_vec(), width, ..default() });
     let x = width * 0.5;
     let at = |x: f32, p: Vec2| Vec3::new(x, p.y, p.x);
     // Top surface, facing up (or towards the open side where vertical).

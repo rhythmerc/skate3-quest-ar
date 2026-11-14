@@ -30,6 +30,7 @@
 //! saved between launches ([`layout`]). Their collision and grind rails are
 //! built by `xr::real_world`.
 mod anchor;
+mod dress;
 mod layout;
 mod legend;
 pub(crate) mod pieces;
@@ -1747,7 +1748,10 @@ fn cast_past(
 /// and the palette.
 #[derive(Resource, Default)]
 struct PieceAssets {
-    meshes: HashMap<(PieceKind, u32, u32, u32), Handle<Mesh>>,
+    /// (the last: in wood, for the kinds that are then built of sheets)
+    meshes: HashMap<(PieceKind, u32, u32, u32, bool), Handle<Mesh>>,
+    /// What is drawn over the pieces and not ridden (`dress::details`).
+    detail: Option<Handle<StandardMaterial>>,
     solid: HashMap<(PieceKind, Finish, Option<Tint>), Handle<StandardMaterial>>,
     /// A finish's photograph, and (true) that photograph without its own
     /// colour, to be given another.
@@ -1761,10 +1765,27 @@ struct PieceAssets {
 }
 
 impl PieceAssets {
-    fn mesh(&mut self, piece: Piece, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    fn mesh(&mut self, piece: Piece, finish: Finish, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        let wooden = finish == Finish::Wood && piece.kind.plywood();
         self.meshes
-            .entry((piece.kind, piece.size.to_bits(), piece.width.to_bits(), piece.lift.to_bits()))
-            .or_insert_with(|| meshes.add(piece_mesh(&piece.geometry())))
+            .entry((piece.kind, piece.size.to_bits(), piece.width.to_bits(), piece.lift.to_bits(), wooden))
+            .or_insert_with(|| meshes.add(piece_mesh(&piece.geometry(), finish)))
+            .clone()
+    }
+
+    /// The material of everything drawn over a piece: coloured by its corners.
+    fn detail(&mut self, materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+        self.detail
+            .get_or_insert_with(|| {
+                materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    perceptual_roughness: 0.45,
+                    metallic: 0.15,
+                    // (it lies a few millimetres over the piece, which in a miniature is nothing: it wins)
+                    depth_bias: 8.0,
+                    ..default()
+                })
+            })
             .clone()
     }
 
@@ -1780,10 +1801,13 @@ impl PieceAssets {
             return material.clone();
         }
         let look = finish.look();
+        // A ramp in wood is plywood: the photograph's grain, in birch's colour.
+        let plywood = finish == Finish::Wood && kind.plywood() && tint.is_none();
+        let neutral = tint.is_some() || plywood;
         let texture = look.texture.map(|(bytes, _)| {
             self.textures
-                .entry((finish, tint.is_some()))
-                .or_insert_with(|| images.add(tiling_texture(bytes, tint.is_some())))
+                .entry((finish, neutral))
+                .or_insert_with(|| images.add(tiling_texture(bytes, neutral)))
                 .clone()
         });
         // A colour of the player's goes over the photograph's light and dark
@@ -1791,13 +1815,15 @@ impl PieceAssets {
         let color = match tint {
             Some(tint) if texture.is_some() => (tint.color().to_linear() * (1.0 / NEUTRAL_LEVEL)).into(),
             Some(tint) => tint.color(),
+            None if plywood => (PLYWOOD.to_linear() * (1.0 / NEUTRAL_LEVEL)).into(),
             None => look.color.unwrap_or(kind.color()),
         };
         let material = materials.add(StandardMaterial {
             base_color: color,
             base_color_texture: texture,
             // Texture coordinates are metres ([`PieceGeometry::uvs`]).
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look.texture.map_or(1.0, |(_, metres)| metres))),
+            // (a sheet of plywood's grain is finer than a plank's)
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look.texture.map_or(1.0, |(_, metres)| if plywood { metres * 0.6 } else { metres }))),
             perceptual_roughness: look.roughness,
             metallic: look.metallic,
             // (a sunk piece is only its inside: its faces seen from behind, through the surface
@@ -1810,6 +1836,9 @@ impl PieceAssets {
         material
     }
 }
+
+/// Birch plywood, as a ramp is built of.
+const PLYWOOD: Color = Color::srgb(0.8, 0.69, 0.52);
 
 /// How a finish is drawn.
 struct Look {
@@ -1918,7 +1947,25 @@ fn halve(pixels: &[u8], width: usize, height: usize) -> Vec<u8> {
     out
 }
 
-fn piece_mesh(geometry: &PieceGeometry) -> Mesh {
+/// A mesh from corners, three to a triangle.
+fn dressed_mesh(dressed: dress::Dressed, textured: bool) -> Mesh {
+    let mesh = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, dressed.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, dressed.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, dressed.colors);
+    if textured { mesh.with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, dressed.uvs) } else { mesh }
+}
+
+/// What is drawn over a piece and not ridden (`dress::details`), if it has any.
+fn detail_mesh(geometry: &PieceGeometry, kind: PieceKind, finish: Finish) -> Option<Mesh> {
+    dress::details(geometry, finish == Finish::Wood && kind.plywood()).map(|dressed| dressed_mesh(dressed, false))
+}
+
+/// A piece's mesh. In wood, a ramp is in sheets (`dress::sheets`).
+fn piece_mesh(geometry: &PieceGeometry, finish: Finish) -> Mesh {
+    if let Some(sheets) = Some(()).filter(|_| finish == Finish::Wood).and_then(|_| dress::sheets(geometry)) {
+        return dressed_mesh(sheets, true);
+    }
     let seen = |index: &usize| !geometry.unseen.contains(index);
     let positions: Vec<[f32; 3]> = geometry
         .all_quads()
@@ -2151,9 +2198,9 @@ fn sync_pieces(
         };
         // (a drawn piece's mesh is its own)
         let mesh = match (&item.path, item.own_posts()) {
-            (None, false) => assets.mesh(item.piece, &mut meshes),
+            (None, false) => assets.mesh(item.piece, item.finish(), &mut meshes),
             // (so is a rail's with posts left out)
-            _ => meshes.add(piece_mesh(&item.geometry())),
+            _ => meshes.add(piece_mesh(&item.geometry(), item.finish())),
         };
         let visual = commands
             .spawn((
@@ -2166,6 +2213,10 @@ fn sync_pieces(
             .id();
         // Sunk into a surface: from the side that surface hides it (its own outside does, drawn
         // into depth only).
+        // What is drawn over it: a ramp's coping, and in wood its seams, edges and plate.
+        if let Some(detail) = Some(()).filter(|_| !item.hidden && item.path.is_none()).and_then(|_| detail_mesh(&item.geometry(), item.piece.kind, item.finish())) {
+            commands.spawn((Mesh3d(meshes.add(detail)), MeshMaterial3d(assets.detail(&mut materials)), Transform::default(), ChildOf(visual)));
+        }
         if item.piece.kind.sunk() && !item.hidden {
             let occluder = assets.occluder.get_or_insert_with(|| occluders.add(Occluder::default())).clone();
             commands.spawn((Mesh3d(mesh), MeshMaterial3d(occluder), Transform::default(), ChildOf(visual)));
@@ -2232,7 +2283,7 @@ fn show_build(
                 ghost_piece.0 = Some((piece, state.free));
                 let material = if state.free { assets.ghost_free.clone() } else { assets.ghost.clone() };
                 commands.entity(ghost_entity).insert((
-                    Mesh3d(assets.mesh(piece, &mut meshes)),
+                    Mesh3d(assets.mesh(piece, Finish::Paint, &mut meshes)),
                     MeshMaterial3d(material.unwrap_or_default()),
                 ));
             }
@@ -2290,7 +2341,7 @@ fn show_build(
         if icon.shown != Some((kind, finish, tint)) {
             icon.shown = Some((kind, finish, tint));
             commands.entity(entity).insert((
-                Mesh3d(assets.mesh(Piece::new(kind), &mut meshes)),
+                Mesh3d(assets.mesh(Piece::new(kind), finish, &mut meshes)),
                 MeshMaterial3d(assets.solid(kind, finish, tint, &mut materials, &mut images)),
             ));
         }
@@ -2375,7 +2426,7 @@ fn show_drawn(
                 let key = path.key() ^ state.selected as u64 ^ (state.piece().width.to_bits() as u64) << 32;
                 if visual.0 != Some(key) {
                     visual.0 = Some(key);
-                    commands.entity(entity).insert(Mesh3d(meshes.add(piece_mesh(&path.geometry(state.piece())))));
+                    commands.entity(entity).insert(Mesh3d(meshes.add(piece_mesh(&path.geometry(state.piece()), Finish::Paint))));
                 }
                 *transform = Transform { translation: root.transform_point(origin), rotation: root.rotation, scale: Vec3::splat(placed.park_scale) };
                 visibility.set_if_neq(Visibility::Visible);
@@ -2441,8 +2492,8 @@ fn show_edit(
                     if mark.1 != Some((item.piece, item.shape_key())) {
                         mark.1 = Some((item.piece, item.shape_key()));
                         let mesh = match (&item.path, item.own_posts()) {
-                            (None, false) => assets.mesh(item.piece, &mut meshes),
-                            _ => meshes.add(piece_mesh(&item.geometry())),
+                            (None, false) => assets.mesh(item.piece, Finish::Paint, &mut meshes),
+                            _ => meshes.add(piece_mesh(&item.geometry(), Finish::Paint)),
                         };
                         commands.entity(entity).insert(Mesh3d(mesh));
                     }
@@ -2525,6 +2576,66 @@ mod tests {
         // Another bowl's hole stays a hole.
         placed.dragging = Some(8);
         assert!(cast(&world, &placed, &Transform::IDENTITY, from, down).is_none());
+    }
+
+    /// The wooden ramps as they are drawn, saved as a picture to look at:
+    /// `SK8_PIECE_SHOT=/path/ramps.png cargo test ... a_picture_of_the_wooden_ramps -- --ignored`
+    /// (`SK8_PIECE_VIEW=x,y,z` moves the camera; `SK8_PIECE_KINDS=HalfPipe,...` chooses the pieces).
+    #[test]
+    #[ignore = "needs a GPU; writes a picture"]
+    fn a_picture_of_the_wooden_ramps() {
+        use bevy::camera::RenderTarget;
+        use bevy::render::render_resource::TextureFormat;
+        use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+        let Some(path) = std::env::var_os("SK8_PIECE_SHOT") else { return };
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .build()
+                .disable::<bevy::winit::WinitPlugin>()
+                .set(WindowPlugin { primary_window: None, exit_condition: bevy::window::ExitCondition::DontExit, ..default() }),
+        );
+        app.init_resource::<PieceAssets>();
+        let image = Image::new_target_texture(1600, 1000, TextureFormat::Rgba8UnormSrgb, None);
+        let image = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+        let target = image.clone();
+        app.add_systems(Startup, move |mut commands: Commands, mut assets: ResMut<PieceAssets>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>| {
+            let view: Vec<f32> = std::env::var("SK8_PIECE_VIEW").ok().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+            let eye = if view.len() == 3 { Vec3::new(view[0], view[1], view[2]) } else { Vec3::new(9.0, 6.5, 11.0) };
+            commands.spawn((
+                Camera3d::default(),
+                Camera { clear_color: ClearColorConfig::Custom(Color::srgb(0.8, 0.8, 0.82)), ..default() },
+                RenderTarget::Image(target.clone().into()),
+                AmbientLight { brightness: 500.0, ..default() },
+                Transform::from_translation(eye).looking_at(Vec3::new(0.0, 0.6, 0.0), Vec3::Y),
+            ));
+            commands.spawn((DirectionalLight { illuminance: 9000.0, shadows_enabled: true, ..default() }, Transform::from_xyz(4.0, 9.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y)));
+            commands.spawn((Mesh3d(meshes.add(Plane3d::default().mesh().size(60.0, 60.0))), MeshMaterial3d(materials.add(Color::srgb(0.75, 0.75, 0.76))), Transform::from_xyz(0.0, -0.002, 0.0)));
+            let wanted = std::env::var("SK8_PIECE_KINDS").unwrap_or_else(|_| "HalfPipe,QuarterPipe,Kicker".into());
+            let kinds: Vec<PieceKind> = PieceKind::ALL.iter().copied().filter(|k| wanted.split(',').any(|w| w == format!("{k:?}"))).collect();
+            let finish = if std::env::var_os("SK8_PIECE_CONCRETE").is_some() { Finish::Concrete } else { Finish::Wood };
+            let mut x = -(kinds.len() as f32 - 1.0) * 3.2;
+            for kind in kinds {
+                let piece = Piece::new(kind);
+                let at = Transform::from_xyz(x, 0.0, 0.0).with_rotation(Quat::from_rotation_y(0.5));
+                x += 6.4;
+                let visual = commands.spawn((Mesh3d(assets.mesh(piece, finish, &mut meshes)), MeshMaterial3d(assets.solid(kind, finish, None, &mut materials, &mut images)), at)).id();
+                if let Some(detail) = detail_mesh(&piece.geometry(), kind, finish) {
+                    commands.spawn((Mesh3d(meshes.add(detail)), MeshMaterial3d(assets.detail(&mut materials)), Transform::default(), ChildOf(visual)));
+                }
+            }
+        });
+        app.finish();
+        app.cleanup();
+        for _ in 0..40 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.world_mut().spawn(Screenshot::image(image)).observe(save_to_disk(std::path::PathBuf::from(path)));
+        for _ in 0..40 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Build mode run by hand: a 40 m floor, the right controller 1.5 m over its middle.
