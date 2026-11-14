@@ -15,6 +15,8 @@ struct Eye {
     hole_count: u32,
     // How far under a mouth's height counts as in the bowl (world units).
     below: f32,
+    // Not 0: one sample of the room's image a pixel (hard edges, quick).
+    hard: u32,
     // The mouths of the bowls sunk into real surfaces: the centre (world), and the radius.
     holes: array<vec4<f32>, 4>,
 }
@@ -93,6 +95,10 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4(1.0);
     }
     let size = vec2<i32>(textureDimensions(room_depth).xy);
+    if eye.hard != 0u {
+        // The texel the pixel is in, and no other: edges step along the room's texels.
+        return vec4(seen(room_distance(vec2<i32>(floor(image * vec2<f32>(size))), size), ahead));
+    }
     let texel = image * vec2<f32>(size) - 0.5;
     let base = vec2<i32>(floor(texel));
     // The room's image is far coarser than the picture (a texel is some

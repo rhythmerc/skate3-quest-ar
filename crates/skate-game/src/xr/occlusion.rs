@@ -4,8 +4,10 @@
 //! eye view takes out the pixels whose place in the room is behind what is
 //! really there (`occlusion.wgsl`).
 //!
-//! Off unless the AR settings turn it on (the pass costs GPU time). Edges
-//! are feathered over sixteen depth samples a pixel. Only solid things are hidden: the
+//! Off unless the AR settings turn it on (the pass costs GPU time). Hard:
+//! one depth sample a pixel, the cheap one, its edges stepped along the
+//! depth image's texels. Soft: edges feathered over sixteen samples a
+//! pixel, which costs frames in a busy park. Only solid things are hidden: the
 //! menu, the build legend and other see-through draws write no depth and
 //! stay in front of everything.
 //!
@@ -50,15 +52,17 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Occlusion {
     #[default]
     Off,
-    /// (Settings from when there was also a "hard" read as on.)
-    #[serde(alias = "Hard")]
+    /// One depth sample a pixel: quick, with stepped edges.
+    Hard,
+    /// Sixteen, feathered: smooth edges, at a cost in frames.
     Soft,
 }
 
 impl Occlusion {
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Off => Self::Soft,
+            Self::Off => Self::Hard,
+            Self::Hard => Self::Soft,
             Self::Soft => Self::Off,
         }
     }
@@ -66,7 +70,8 @@ impl Occlusion {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::Soft => "on",
+            Self::Hard => "on, hard edges (quick)",
+            Self::Soft => "on, soft edges (slower)",
         }
     }
 }
@@ -207,6 +212,8 @@ struct Eye {
     hole_count: u32,
     /// [`BELOW_M`] in the game world's units.
     below: f32,
+    /// Not 0: one depth sample a pixel ([`Occlusion::Hard`]).
+    hard: u32,
     holes: [Vec4; HOLES],
 }
 
@@ -473,6 +480,7 @@ fn prepare(
             far: if latest.far.is_finite() { latest.far } else { 0.0 },
             layer: layer as u32,
             hole_count: wanted.hole_count,
+            hard: (wanted.mode == Occlusion::Hard) as u32,
             below: BELOW_M * wanted.world_from_tracking.x_axis.truncate().length(),
             holes: wanted.holes,
         };
@@ -541,11 +549,11 @@ mod tests {
 
     #[test]
     fn the_setting_goes_round_and_reads_old_files() {
-        assert_eq!(Occlusion::Off.next().next(), Occlusion::Off);
+        assert_eq!(Occlusion::Off.next(), Occlusion::Hard, "the quick one comes first");
+        assert_eq!(Occlusion::Off.next().next().next(), Occlusion::Off);
         assert_eq!(Occlusion::default(), Occlusion::Off);
-        for old in ["\"Soft\"", "\"Hard\""] {
-            let s: Occlusion = serde_json::from_str(old).unwrap();
-            assert_eq!((s, s.name()), (Occlusion::Soft, "on"));
+        for (old, mode) in [("\"Soft\"", Occlusion::Soft), ("\"Hard\"", Occlusion::Hard), ("\"Off\"", Occlusion::Off)] {
+            assert_eq!(serde_json::from_str::<Occlusion>(old).unwrap(), mode);
         }
     }
 
