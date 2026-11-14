@@ -346,6 +346,31 @@ impl PieceGeometry {
             .collect()
     }
 
+    /// The posts at the rail's two ends: for each end of its line, the post nearest it.
+    pub(crate) fn end_posts(&self) -> [Option<usize>; 2] {
+        let places = self.post_places();
+        let nearest = |end: Option<&Vec3>| {
+            let end = end?.xz();
+            (0..places.len()).min_by(|&a, &b| places[a].distance(end).total_cmp(&places[b].distance(end)))
+        };
+        let line = self.rails.first();
+        [nearest(line.and_then(|l| l.first())), nearest(line.and_then(|l| l.last()))]
+    }
+
+    /// With its two end posts ([`Self::end_posts`]) reaching this much further down.
+    pub(crate) fn with_ends_down(mut self, down: [f32; 2]) -> Self {
+        for (post, down) in self.end_posts().into_iter().zip(down) {
+            let (Some(post), true) = (post, down > 0.0) else { continue };
+            let (first, count) = self.posts[post];
+            let corners = || first..first + count;
+            let low = self.quads[corners()].iter().flatten().map(|p| p.y).fold(f32::MAX, f32::min);
+            for p in self.quads[corners()].iter_mut().flatten().filter(|p| p.y < low + 1e-4) {
+                p.y -= down;
+            }
+        }
+        self
+    }
+
     /// Without the posts whose bit is set in `left_out`.
     pub(crate) fn without_posts(mut self, left_out: u32) -> Self {
         // (only rails have posts, and they have no faces known by index)

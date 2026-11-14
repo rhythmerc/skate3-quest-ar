@@ -136,6 +136,10 @@ pub(crate) struct Placed {
     /// (`no_posts_over_gaps`); not saved.
     #[serde(skip)]
     pub no_posts: u32,
+    /// How much further down than made its two end posts reach, to stand on
+    /// what is under them (its own metres; `no_posts_over_gaps`); not saved.
+    #[serde(skip)]
+    pub ends_down: [f32; 2],
     /// What it is made of; absent (layouts from before finishes, and pieces
     /// left as they come): its kind's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,7 +202,12 @@ impl Placed {
 
     /// What is ridden and drawn: its path's shape if it was drawn, else its kind's.
     pub(crate) fn geometry(&self) -> PieceGeometry {
-        self.whole_geometry().without_posts(self.no_posts)
+        self.whole_geometry().with_ends_down(self.ends_down).without_posts(self.no_posts)
+    }
+
+    /// Its posts are not as its kind's come: its mesh is its own.
+    fn own_posts(&self) -> bool {
+        self.no_posts != 0 || self.ends_down != [0.0; 2]
     }
 
     /// With every post, the ones over a gap too.
@@ -211,7 +220,8 @@ impl Placed {
 
     /// Changes whenever its shape would.
     fn shape_key(&self) -> u64 {
-        self.path.as_ref().map_or(0, drawn::Path::key) ^ u64::from(self.no_posts).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        let ends = u64::from(self.ends_down[0].to_bits()) << 32 | u64::from(self.ends_down[1].to_bits());
+        self.path.as_ref().map_or(0, drawn::Path::key) ^ u64::from(self.no_posts).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ ends.wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
     }
 
     /// A tracking-space point in the piece's own metres, and back.
@@ -326,6 +336,7 @@ impl PlacedPieces {
             scale,
             hidden: false,
             no_posts: 0,
+ends_down: [0.0; 2],
             finish: None,
             tint: None,
             path: None,
@@ -417,6 +428,11 @@ struct BuildState {
     scale: f32,
     /// How long the right grip has been held since it was pressed.
     grip_hold: Option<f32>,
+    /// The piece being moved: from where the pointer was on the ground when
+    /// it was picked up to the piece's own place (tracking space, level),
+    /// and its turn then. It keeps that far from the pointer, so it doesn't
+    /// jump to it.
+    carry: Option<(Vec3, f32)>,
     /// Parts of a colour step the stick has run up (hue, lightness).
     tint_owed: Vec2,
     previous: Buttons,
@@ -456,6 +472,7 @@ impl Default for BuildState {
             edit: Edit::Turn,
             scale: 1.0,
             grip_hold: None,
+            carry: None,
             tint_owed: Vec2::ZERO,
             previous: Buttons::default(),
         }
@@ -545,11 +562,12 @@ fn no_posts_over_gaps(rig: Res<Rig>, world: Res<ArWorld>, mut placed: ResMut<Pla
         return;
     }
     let Some(root) = rig.root_transform() else { return };
-    let masks = posts_over_gaps(&world, &placed, &root);
-    if placed.items.iter().zip(&masks).any(|(item, mask)| item.no_posts != *mask) {
+    let posts = posts_over_gaps(&world, &placed, &root);
+    if placed.items.iter().zip(&posts).any(|(item, (mask, down))| item.no_posts != *mask || item.ends_down != *down) {
         let placed = &mut *placed;
-        for (item, mask) in placed.items.iter_mut().zip(masks) {
+        for (item, (mask, down)) in placed.items.iter_mut().zip(posts) {
             item.no_posts = mask;
+            item.ends_down = down;
         }
         // (the collision and the pieces' meshes are made again)
         placed.revision += 1;
@@ -559,9 +577,11 @@ fn no_posts_over_gaps(rig: Res<Rig>, world: Res<ArWorld>, mut placed: ResMut<Pla
 
 /// For each piece, its posts (by bit) with nothing to stand on: under the
 /// post's foot the room and the other pieces are well below it (the inside
-/// of a bowl, the drop between two tables or two platforms, the air under a
-/// rail put up in free placement) or not there at all.
-fn posts_over_gaps(world: &ArWorld, placed: &PlacedPieces, root: &Transform) -> Vec<u32> {
+/// of a bowl, the drop between two tables or two platforms) or not there at
+/// all. A rail always keeps the posts at its two ends: those reach down
+/// instead to whatever is under them, by the second of the pair (its own
+/// metres).
+fn posts_over_gaps(world: &ArWorld, placed: &PlacedPieces, root: &Transform) -> Vec<(u32, [f32; 2])> {
     let metres = placed.park_scale / root.scale.x;
     let to_tracking = root.compute_affine().inverse();
     let down = root.rotation * Vec3::NEG_Y;
@@ -570,18 +590,26 @@ fn posts_over_gaps(world: &ArWorld, placed: &PlacedPieces, root: &Transform) -> 
         .iter()
         .map(|item| {
             if !item.piece.kind.on_posts() {
-                return 0;
+                return (0, [0.0; 2]);
             }
-            let mut mask = 0u32;
-            for (index, (foot, top)) in item.whole_geometry().post_spans().into_iter().enumerate().take(32) {
+            let whole = item.whole_geometry();
+            let ends = whole.end_posts();
+            let k = metres * item.scale;
+            let (mut mask, mut ends_down) = (0u32, [0.0; 2]);
+            for (index, (foot, top)) in whole.post_spans().into_iter().enumerate().take(32) {
                 let (foot, top) = (item.from_local(metres, foot), item.from_local(metres, top));
-                let under = cast_past(world, placed, root, root.transform_point(top), down, Some(item.id));
-                let gap = POST_GAP * metres * item.scale;
-                if under.is_none_or(|hit| to_tracking.transform_point3(hit.point).y < foot.y - gap) {
+                let under = cast_past(world, placed, root, root.transform_point(top), down, Some(item.id)).map(|hit| to_tracking.transform_point3(hit.point).y);
+                if ends.contains(&Some(index)) {
+                    // (to the millimetre, so that it settles)
+                    let reach = under.map_or(0.0, |y| ((foot.y - y) / k * 1000.0).round() / 1000.0).max(0.0);
+                    for end in ends.iter().zip(&mut ends_down).filter(|(end, _)| **end == Some(index)).map(|(_, down)| down) {
+                        *end = reach;
+                    }
+                } else if under.is_none_or(|y| y < foot.y - POST_GAP * k) {
                     mask |= 1 << index;
                 }
             }
-            mask
+            (mask, ends_down)
         })
         .collect()
 }
@@ -749,11 +777,19 @@ fn build_controls(
     placed.pointed = hit.and_then(|h| h.piece);
     let valid = hit.filter(|h| h.normal.y >= MIN_UP);
     // Where a piece goes: on the surface pointed at, or (free placement) in the hand.
+    if placed.dragging.is_none() {
+        state.carry = None;
+    }
     state.ghost = if state.free {
         let held = controller.transform_point(Vec3::NEG_Z * FREE_REACH_M);
         Some((held, root.transform_point(held)))
     } else {
-        valid.map(|h| (to_tracking.transform_point3(h.point), h.point))
+        valid.map(|h| {
+            // (a piece being moved: as far from the pointer as when it was picked up, turned as it has been since)
+            let carried = state.carry.map_or(Vec3::ZERO, |(offset, yaw)| Quat::from_rotation_y(state.yaw - yaw) * offset);
+            let at = to_tracking.transform_point3(h.point) + carried;
+            (at, root.transform_point(at))
+        })
     };
     state.ray = match hit {
         // (in the hand there is nothing to point at but a piece to select)
@@ -943,6 +979,7 @@ fn build_controls(
                 scale: snap_scale(state.scale),
                 hidden: false,
                 no_posts: 0,
+ends_down: [0.0; 2],
                 finish: None,
                 tint: None,
                 path: None,
@@ -1070,6 +1107,11 @@ fn build_controls(
             placed.dragging = Some(id);
             if let Some(item) = placed.items.iter().find(|p| p.id == id) {
                 state.yaw = item.yaw;
+                // Where the pointer is on the ground with the piece out of its way.
+                let under = Some(()).filter(|_| !state.free).and_then(|_| cast(&world, &placed, &root, origin, direction)).filter(|h| h.normal.y >= MIN_UP);
+                state.carry = under.map(|h| ((Vec3::from_array(item.position) - to_tracking.transform_point3(h.point)).with_y(0.0), item.yaw));
+                // (this frame too: it stays where it is)
+                state.ghost = state.ghost.filter(|_| state.carry.is_none()).or(Some((Vec3::from_array(item.position), root.transform_point(Vec3::from_array(item.position)))));
             }
             info!("BUILD picked up piece {id}");
         }
@@ -2108,8 +2150,8 @@ fn sync_pieces(
             assets.solid(item.piece.kind, item.finish(), item.tint, &mut materials, &mut images)
         };
         // (a drawn piece's mesh is its own)
-        let mesh = match (&item.path, item.no_posts) {
-            (None, 0) => assets.mesh(item.piece, &mut meshes),
+        let mesh = match (&item.path, item.own_posts()) {
+            (None, false) => assets.mesh(item.piece, &mut meshes),
             // (so is a rail's with posts left out)
             _ => meshes.add(piece_mesh(&item.geometry())),
         };
@@ -2398,8 +2440,8 @@ fn show_edit(
                 item.map(|item| {
                     if mark.1 != Some((item.piece, item.shape_key())) {
                         mark.1 = Some((item.piece, item.shape_key()));
-                        let mesh = match (&item.path, item.no_posts) {
-                            (None, 0) => assets.mesh(item.piece, &mut meshes),
+                        let mesh = match (&item.path, item.own_posts()) {
+                            (None, false) => assets.mesh(item.piece, &mut meshes),
                             _ => meshes.add(piece_mesh(&item.geometry())),
                         };
                         commands.entity(entity).insert(Mesh3d(mesh));
@@ -2466,6 +2508,7 @@ fn icon_extent(kind: PieceKind) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xr::touch::TouchState;
 
     #[test]
     fn a_bowl_being_moved_can_be_put_back_where_it_was() {
@@ -2484,8 +2527,127 @@ mod tests {
         assert!(cast(&world, &placed, &Transform::IDENTITY, from, down).is_none());
     }
 
+    /// Build mode run by hand: a 40 m floor, the right controller 1.5 m over its middle.
+    struct Bench {
+        world: World,
+        schedule: Schedule,
+    }
+
+    impl Bench {
+        fn new(kind: PieceKind) -> Self {
+            let mut world = World::new();
+            let floor = [Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 0.0, -20.0), Vec3::new(20.0, 0.0, 20.0), Vec3::new(-20.0, 0.0, 20.0)];
+            world.insert_resource(ArWorld { revision: 1, room_quads: vec![floor], ..default() });
+            world.insert_resource(Rig { scale: 1.0, world_origin: Vec3::ZERO, anchor: Some((Vec3::ZERO, 0.0)) });
+            world.insert_resource(BuildMode { active: true });
+            world.insert_resource(BuildState { selected: PieceKind::ALL.iter().position(|&k| k == kind).unwrap(), ..default() });
+            world.insert_resource(Time::<Real>::default());
+            world.init_resource::<LatestTouch>();
+            world.init_resource::<PlacedPieces>();
+            world.init_resource::<SceneShapes>();
+            world.init_resource::<SceneCapture>();
+            world.init_resource::<ExternalPad>();
+            world.init_resource::<Messages<TeleportSkater>>();
+            world.spawn((Hand::Right, Transform::from_xyz(0.0, 1.5, 0.0)));
+            let mut schedule = Schedule::default();
+            schedule.add_systems(build_controls);
+            Self { world, schedule }
+        }
+
+        /// Point the controller at `at`.
+        fn aim(&mut self, at: Vec3) {
+            let mut hands = self.world.query::<(&Hand, &mut Transform)>();
+            for (_, mut hand) in hands.iter_mut(&mut self.world) {
+                *hand = Transform::from_xyz(0.0, 1.5, 0.0).looking_at(at, Vec3::Y);
+            }
+        }
+
+        /// `frames` frames (72 a second) with the controls as `touch` leaves them.
+        fn hold(&mut self, frames: usize, touch: impl Fn(&mut TouchState)) {
+            for _ in 0..frames {
+                let mut state = TouchState::default();
+                touch(&mut state);
+                self.world.resource_mut::<LatestTouch>().0 = state;
+                self.world.resource_mut::<Time<Real>>().advance_by(std::time::Duration::from_secs_f32(1.0 / 72.0));
+                self.schedule.run(&mut self.world);
+            }
+        }
+
+        fn tap(&mut self, touch: impl Fn(&mut TouchState)) {
+            self.hold(2, touch);
+            self.hold(2, |_| {});
+        }
+
+        fn state(&self) -> &BuildState {
+            self.world.resource::<BuildState>()
+        }
+
+        fn placed(&self) -> &PlacedPieces {
+            self.world.resource::<PlacedPieces>()
+        }
+    }
+
     #[test]
-    fn a_rail_has_no_posts_over_a_gap() {
+    fn the_first_point_of_a_ramp_is_raised_with_the_stick_before_it_is_put_down() {
+        let mut bench = Bench::new(PieceKind::Deck);
+        bench.aim(Vec3::new(0.0, 0.0, -3.0));
+        bench.hold(72, |t| t.right_stick = [0.0, 1.0]);
+        let pending = bench.state().pending.expect("a point to put down");
+        assert!((pending.at[1] - RISE_RATE).abs() < 0.01 && pending.base.abs() < 1e-4, "{pending:?}");
+        bench.tap(|t| t.right_trigger = 1.0);
+        assert!((bench.state().draft[0].at[1] - RISE_RATE).abs() < 0.01);
+        // The next starts at that height; finished, the ramp begins raised over its surface.
+        bench.aim(Vec3::new(0.0, 0.0, -7.0));
+        bench.hold(2, |_| {});
+        bench.tap(|t| t.right_trigger = 1.0);
+        bench.tap(|t| t.a = true);
+        let item = &bench.placed().items[0];
+        let nodes = &item.path.as_ref().unwrap().nodes;
+        assert!(item.position[1].abs() < 1e-4 && (nodes[0].at[1] - RISE_RATE).abs() < 0.01 && (nodes[1].at[1] - RISE_RATE).abs() < 0.01, "{item:?}");
+    }
+
+    #[test]
+    fn a_drawn_ramp_picked_up_stays_under_the_pointer_where_it_was_taken() {
+        let mut bench = Bench::new(PieceKind::Deck);
+        for (z, stick) in [(-3.0, 0.0), (-7.0, 1.0)] {
+            bench.aim(Vec3::new(0.0, 0.0, z));
+            bench.hold(72, |t| t.right_stick = [0.0, stick]);
+            bench.tap(|t| t.right_trigger = 1.0);
+        }
+        bench.tap(|t| t.a = true);
+        let before = bench.placed().items[0].clone();
+        // Pointing at its top a metre along and off its middle line (clear of its dots), the grip held.
+        let on = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        bench.aim(Vec3::new(0.7, 0.06, -4.0));
+        bench.hold(2, |_| {});
+        assert_eq!((bench.placed().pointed, bench.state().handle), (Some(1), None));
+        bench.hold(36, |t| t.right_grip = 1.0);
+        assert_eq!(bench.placed().dragging, Some(1));
+        assert!(Vec3::from_array(bench.placed().items[0].position).distance(Vec3::from_array(before.position)) < 1e-3, "it jumped when picked up: {:?}", bench.placed().items[0].position);
+        // Where the pointer goes on the floor, it goes as far; back again, it is back.
+        let start = bench.state().ghost.unwrap().0 - Vec3::from_array(before.position);
+        let _ = start;
+        let from = {
+            // (the pointer's place on the floor behind the ramp, which it is held by)
+            let hand = Vec3::new(0.0, 1.5, 0.0);
+            let aim = (Vec3::new(0.7, 0.06, -4.0) - hand).normalize();
+            hand + aim * (1.5 / -aim.y)
+        };
+        for to in [on(2.0, -5.0), on(3.0, -2.0), on(-4.0, -6.0), from, from + Vec3::X * 0.05, from] {
+            bench.aim(to);
+            bench.hold(3, |t| t.right_grip = 1.0);
+            let moved = Vec3::from_array(bench.placed().items[0].position) - Vec3::from_array(before.position);
+            assert!(moved.distance(to - from) < 2e-3, "pointer moved {}, the ramp {moved}", to - from);
+        }
+        bench.hold(3, |_| {});
+        let after = &bench.placed().items[0];
+        assert_eq!(bench.placed().dragging, None);
+        assert!(Vec3::from_array(after.position).distance(Vec3::from_array(before.position)) < 2e-3);
+        assert_eq!((&after.path, after.yaw, after.piece), (&before.path, before.yaw, before.piece), "its shape is as it was");
+    }
+
+    #[test]
+    fn a_rail_has_no_posts_over_a_gap_but_the_ones_at_its_ends() {
         let item = |id, kind, position: [f32; 3]| Placed {
             id,
             piece: Piece::new(kind),
@@ -2494,6 +2656,7 @@ mod tests {
             scale: 1.0,
             hidden: false,
             no_posts: 0,
+            ends_down: [0.0; 2],
             finish: None,
             tint: None,
             path: None,
@@ -2503,39 +2666,49 @@ mod tests {
         let strip = |x0: f32, z0: f32, x1: f32, z1: f32| [Vec3::new(x0, 0.0, z0), Vec3::new(x1, 0.0, z0), Vec3::new(x1, 0.0, z1), Vec3::new(x0, 0.0, z1)];
         let floor = vec![strip(-20.0, -20.0, 20.0, lo.y), strip(-20.0, hi.y, 20.0, 40.0), strip(-20.0, lo.y, lo.x, hi.y), strip(hi.x, lo.y, 20.0, hi.y)];
         let world = ArWorld { revision: 1, room_quads: floor, ..default() };
-        // A rail (posts 2.4 m either side of its middle) with one end over a bowl, and one well clear.
+        // A rail (its two posts 2.4 m either side of its middle) with one end over a bowl, one well
+        // clear, and one put up 2 m in the air in free placement.
         let bowl = item(1, PieceKind::Bowl, [0.0, 0.0, 0.0]);
         let over = item(2, PieceKind::Rail, [2.4, 0.0, 0.0]);
         let clear = item(3, PieceKind::Rail, [0.0, 0.0, 9.0]);
-        // One put up in the air in free placement, and one in the air over a platform it can stand on.
         let high = item(4, PieceKind::Rail, [0.0, 2.0, -9.0]);
         let mut placed = PlacedPieces { items: vec![bowl, over, clear, high], ..default() };
-        let masks = posts_over_gaps(&world, &placed, &Transform::IDENTITY);
-        assert_eq!(masks[..3], [0, 0b01, 0], "the post at the bowl's middle goes, the other stays");
-        assert_eq!(masks[3], 0b11, "in the air, it has no posts at all");
-        let whole = placed.items[1].geometry().quads.len();
-        placed.items[1].no_posts = masks[1];
-        let g = placed.items[1].geometry();
-        assert_eq!(g.quads.len(), whole - 6);
-        assert!(g.quads.iter().flatten().all(|p| p.x > 0.0), "the post left is the far one");
-        assert_eq!(g.rail_quads.len(), 6, "the rail itself is whole");
-        assert_ne!(placed.items[1].shape_key(), placed.items[2].shape_key(), "and its mesh is made again");
-        // A drawn rail from one pad to another, its points on their tops: the post between them,
-        // over the drop, goes; the ones over the pads stay.
+        let posts = posts_over_gaps(&world, &placed, &Transform::IDENTITY);
+        // Both of a straight rail's posts are at its ends: they stay, and reach down to what is under them.
+        assert!(posts.iter().all(|(mask, _)| *mask == 0), "{posts:?}");
+        assert_eq!(posts[2].1, [0.0; 2]);
+        assert!(posts[1].1[0] > 0.5 && posts[1].1[1] == 0.0, "the end over the bowl stands on the bowl's floor: {:?}", posts[1].1);
+        assert!(posts[3].1.iter().all(|down| (down - 2.0).abs() < 1e-3), "{:?}", posts[3].1);
+        let made = placed.items[3].geometry().bounds().0.y;
+        placed.items[3].ends_down = posts[3].1;
+        let g = placed.items[3].geometry();
+        assert!((g.bounds().0.y - (made - 2.0)).abs() < 1e-3 && g.quads.len() == placed.items[2].geometry().quads.len(), "its posts are longer, not more");
+        assert_eq!(g.rail_quads.len(), 6, "the rail itself is as it was");
+        assert_ne!(placed.items[3].shape_key(), placed.items[2].shape_key(), "and its mesh is made again");
+        assert!(placed.items[3].own_posts() && !placed.items[2].own_posts());
+        // A drawn rail from one pad to another, its points on their tops: the posts between them,
+        // over the drop, go; the two at its ends, over the pads, stay as they are.
         let pad = |id, x: f32| {
             let node = |dx: f32, dz: f32| drawn::Node { corner: true, ..drawn::Node::new(Vec3::new(dx, 1.0, dz), 0.0) };
             Placed { path: Some(drawn::Path { nodes: vec![node(-1.5, -1.5), node(1.5, -1.5), node(1.5, 1.5), node(-1.5, 1.5)], ..default() }), ..item(id, PieceKind::Pad, [x, 0.0, 30.0]) }
         };
         let node = |x: f32| drawn::Node::new(Vec3::new(x, 1.0, 0.0), 1.0);
         let rail = Placed { path: Some(drawn::Path { nodes: vec![node(-0.5), node(4.0), node(8.5)], ..default() }), ..item(7, PieceKind::RailPath, [0.0, 0.0, 30.0]) };
-        let placed = PlacedPieces { items: vec![pad(5, 0.0), pad(6, 8.0), rail], ..default() };
-        let posts = placed.items[2].whole_geometry().post_spans();
-        assert_eq!(posts.len(), 5, "its ends, its middle node, and the middle of each long stretch: {posts:?}");
-        let mask = posts_over_gaps(&world, &placed, &Transform::IDENTITY)[2];
-        for (index, (foot, _)) in posts.iter().enumerate() {
+        let mut placed = PlacedPieces { items: vec![pad(5, 0.0), pad(6, 8.0), rail], ..default() };
+        let spans = placed.items[2].whole_geometry().post_spans();
+        assert_eq!(spans.len(), 5, "its ends, its middle node, and the middle of each long stretch: {spans:?}");
+        let (mask, down) = posts_over_gaps(&world, &placed, &Transform::IDENTITY)[2];
+        for (index, (foot, _)) in spans.iter().enumerate() {
             let on_a_pad = foot.x < 1.5 || foot.x > 6.5;
             assert_eq!(mask & (1 << index) == 0, on_a_pad, "the post at x = {}", foot.x);
         }
+        assert_eq!(down, [0.0; 2]);
+        // With the second pad gone, that end's post still stands: down to the floor, a metre below.
+        placed.items.remove(1);
+        let (mask, down) = posts_over_gaps(&world, &placed, &Transform::IDENTITY)[1];
+        let ends = placed.items[1].whole_geometry().end_posts();
+        assert!(ends.iter().all(|end| end.is_some_and(|post| mask & (1 << post) == 0)) && mask.count_ones() == 3, "{mask:b} {ends:?}");
+        assert!(down[0] == 0.0 && (down[1] - 1.0).abs() < 1e-3, "{down:?}");
     }
 
 }

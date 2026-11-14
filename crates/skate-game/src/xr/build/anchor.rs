@@ -394,7 +394,7 @@ mod tests {
     use crate::xr::build::pieces::{Piece, PieceKind};
 
     fn piece(position: [f32; 3], yaw: f32) -> Placed {
-        Placed { id: 1, piece: Piece::new(PieceKind::Kicker), position, yaw, scale: 1.0, hidden: false, no_posts: 0, finish: None, tint: None, path: None }
+        Placed { id: 1, piece: Piece::new(PieceKind::Kicker), position, yaw, scale: 1.0, hidden: false, no_posts: 0, ends_down: [0.0; 2], finish: None, tint: None, path: None }
     }
 
     #[test]

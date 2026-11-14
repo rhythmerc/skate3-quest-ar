@@ -108,6 +108,7 @@ mod tests {
                 scale: 1.75,
                 hidden: true,
                 no_posts: 0,
+ends_down: [0.0; 2],
                 finish: Some(crate::xr::build::pieces::Finish::Brick),
                 tint: Some(crate::xr::build::pieces::Tint { hue: 9, light: 2 }),
                 path: Some(crate::xr::build::pieces::drawn::Path {
