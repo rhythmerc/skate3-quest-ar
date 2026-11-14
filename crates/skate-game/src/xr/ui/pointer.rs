@@ -1,7 +1,7 @@
 //! The menu laser: a ray from the right controller's aim pose onto the panel
 //! quad, turned into a panel pixel and hit-tested against the laid-out rows
 //! (and slider bars). The right trigger clicks; held on a slider it drags.
-use super::{UiBar, UiRow, XrUi};
+use super::{UiBar, UiGraph, UiRow, XrUi};
 use crate::xr::actions::{Hand, LatestTouch};
 use crate::xr::panel::{HEIGHT_M, HEIGHT_PX, WIDTH_M, WIDTH_PX, XrPanel};
 use crate::xr::rig::Rig;
@@ -22,6 +22,8 @@ pub(crate) struct UiPointer {
     px: Option<Vec2>,
     /// Slider bars on screen: slot, centre and size in panel pixels.
     bars: Vec<(usize, Vec2, Vec2)>,
+    /// The page's graph, if it shows one: its centre and size in panel pixels.
+    graph: Option<(Vec2, Vec2)>,
     /// The trigger was pulled this frame with the laser on the panel.
     pub click: bool,
     /// The trigger is held.
@@ -50,6 +52,15 @@ impl UiPointer {
         let px = self.px?;
         let &(_, centre, size) = self.bars.iter().find(|b| b.0 == slot)?;
         (size.x > 0.0).then(|| ((px.x - (centre.x - size.x / 2.0)) / size.x).clamp(0.0, 1.0))
+    }
+
+    /// Where on the page's graph the laser is, as a fraction of it from its
+    /// top left (the nearest place on it, from outside), and whether on it.
+    pub(crate) fn graph_at(&self) -> Option<(Vec2, bool)> {
+        let (px, (centre, size)) = (self.px?, self.graph?);
+        let at = (px - (centre - size / 2.0)) / size;
+        let on = at.clamp(Vec2::ZERO, Vec2::ONE);
+        Some((on, on == at))
     }
 }
 
@@ -81,6 +92,7 @@ pub(super) fn aim(
     hands: Query<(&Hand, &Transform)>,
     rows: Query<(&UiRow, &ComputedNode, &UiGlobalTransform)>,
     bars: Query<(&UiBar, &ComputedNode, &UiGlobalTransform)>,
+    graphs: Query<(&ComputedNode, &UiGlobalTransform), With<UiGraph>>,
     mut pointer: ResMut<UiPointer>,
     mut pressed: Local<bool>,
 ) {
@@ -110,6 +122,7 @@ pub(super) fn aim(
             .filter(|(_, node, _)| node.size().x > 0.0)
             .map(|(b, node, tf)| (b.0, tf.translation, node.size()))
             .collect(),
+        graph: graphs.iter().find(|(node, _)| node.size().x > 0.0).map(|(node, tf)| (tf.translation, node.size())),
         click: *pressed && !was && hit.is_some(),
         held: *pressed,
         beam: Some(match hit {
@@ -206,6 +219,11 @@ mod tests {
             bars: vec![(2, Vec2::new(200.0, 300.0), Vec2::new(200.0, 14.0))],
             ..default()
         };
+        // A graph: a fraction both ways, held to its edge from outside it.
+        let g = UiPointer { px: Some(Vec2::new(150.0, 250.0)), graph: Some((Vec2::new(200.0, 300.0), Vec2::new(200.0, 200.0))), ..default() };
+        assert_eq!(g.graph_at(), Some((Vec2::new(0.25, 0.25), true)));
+        let g = UiPointer { px: Some(Vec2::new(350.0, 250.0)), ..g };
+        assert_eq!(g.graph_at(), Some((Vec2::new(1.0, 0.25), false)));
         assert_eq!(p.bar_frac(3, 5), Some(0.25));
         assert_eq!(p.bar_frac(3, 4), None);
         assert_eq!(p.bar_frac(6, 5), None);

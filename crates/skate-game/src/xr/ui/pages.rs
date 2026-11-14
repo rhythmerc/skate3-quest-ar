@@ -419,7 +419,7 @@ fn build_widgets(world: &World) -> Vec<Widget> {
 fn build_act(widget: &str, act: Act, world: &mut World) -> Option<Outcome> {
     let value = match act {
         Act::Set(v) => Some(v),
-        Act::Press => None,
+        _ => None,
     };
     Some(match widget {
         "build" => {

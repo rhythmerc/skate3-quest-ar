@@ -30,6 +30,14 @@ use std::sync::Arc;
 
 /// Rows on the panel at once; longer pages scroll with the cursor.
 const VISIBLE_ROWS: usize = 13;
+/// And under a page's graph.
+const GRAPH_ROWS: usize = 8;
+/// A graph's plot, panel pixels.
+pub(crate) const GRAPH_SIZE: Vec2 = Vec2::new(916.0, 250.0);
+/// How many steps a graph's curve is drawn in.
+pub(crate) const GRAPH_COLUMNS: usize = 229;
+const GRAPH_LINES: usize = 10;
+const GRAPH_HANDLES: usize = 6;
 /// A menu press shorter than this (with nothing else held) is a tap.
 const TAP_SECONDS: f32 = 0.35;
 const STICK: f32 = 0.6;
@@ -88,24 +96,53 @@ impl Widget {
     }
 }
 
+/// A plot above a page's rows, worked with the laser alone: a curve, and
+/// handles on it to grab and drag. Every place is a fraction of the plot,
+/// (0, 0) its top left.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Graph {
+    pub id: &'static str,
+    /// The curve's height left to right, in [`GRAPH_COLUMNS`] steps.
+    pub curve: Vec<f32>,
+    /// The height the curve is filled from.
+    pub zero: f32,
+    pub handles: Vec<GraphHandle>,
+    /// Grid lines across the plot's width and down its height: where, the
+    /// label (or none), and whether it is a strong one.
+    pub across: Vec<(f32, &'static str, bool)>,
+    pub down: Vec<(f32, &'static str, bool)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GraphHandle {
+    pub at: Vec2,
+    pub label: &'static str,
+    pub color: Color,
+    pub selected: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct UiPage {
     pub title: String,
+    pub graph: Option<Graph>,
     pub widgets: Vec<Widget>,
 }
 
 impl UiPage {
     pub(crate) fn new(title: impl Into<String>, widgets: Vec<Widget>) -> Self {
-        Self { title: title.into(), widgets }
+        Self { title: title.into(), graph: None, widgets }
     }
 }
 
 /// What a row was asked to do: pressed (buttons, toggles) or set to a value
-/// (sliders, already clamped and on the step grid).
+/// (sliders, already clamped and on the step grid). A graph: the laser's
+/// trigger pulled at a place on it, then held and moved to another.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Act {
     Press,
     Set(f32),
+    Grab(Vec2),
+    Drag(Vec2),
 }
 
 /// What the menu does after a row acted.
@@ -161,6 +198,8 @@ pub(crate) struct XrUi {
     /// Start placing the skater (`xr::spawn::PlaceSkater`) next frame.
     pub request_recenter: bool,
     drag: Option<usize>,
+    /// The laser has hold of the page's graph.
+    graph_drag: bool,
     view: View,
     /// The menu opened itself at launch.
     started: bool,
@@ -182,6 +221,7 @@ impl XrUi {
         self.open = false;
         self.external = None;
         self.drag = None;
+        self.graph_drag = false;
     }
 
     pub(crate) fn say(&mut self, text: impl Into<String>) {
@@ -194,6 +234,7 @@ impl XrUi {
 struct View {
     title: String,
     trail: String,
+    graph: Option<Graph>,
     rows: Vec<RowView>,
     footer: String,
 }
@@ -250,7 +291,7 @@ impl Plugin for XrUiPlugin {
             .add_systems(Startup, (spawn_ui, pointer::spawn_beam))
             .add_systems(
                 Update,
-                (touch_nav, pointer::aim, frame, draw, pointer::draw_beam)
+                (touch_nav, pointer::aim, frame, draw, draw_graph, pointer::draw_beam)
                     .chain()
                     .in_set(UiSet),
             );
@@ -441,7 +482,7 @@ fn frame(world: &mut World) {
     let id = *world.resource::<XrUi>().stack.last().unwrap_or(&pages::START);
     let page = find_page(&providers, id, world);
     let mut outcome = Outcome::Stay;
-    let mut acted: Option<(usize, Act)> = None;
+    let mut acted: Option<(&'static str, Act)> = None;
     {
         let mut ui = world.resource_mut::<XrUi>();
         let w = &page.widgets;
@@ -461,15 +502,26 @@ fn frame(world: &mut World) {
         }
         if !point.held {
             ui.drag = None;
+            ui.graph_drag = false;
+        }
+        // The graph: a pull of the trigger on it takes hold, and it is held
+        // until the trigger is let go, wherever the laser goes.
+        if let Some((graph, (at, inside))) = page.graph.as_ref().and_then(|g| Some((g.id, point.graph_at()?))) {
+            if point.click && inside {
+                ui.graph_drag = true;
+                acted = Some((graph, Act::Grab(at)));
+            } else if ui.graph_drag {
+                acted = Some((graph, Act::Drag(at)));
+            }
         }
         let cursor = ui.cursor;
-        match w.get(cursor) {
+        match w.get(cursor).filter(|_| !ui.graph_drag) {
             Some(Widget::Slider { value, min, max, step, .. }) => {
                 // Held left trigger: five steps at a time.
                 let gain = if nav.fast { 5.0 } else { 1.0 };
                 if nav.left || nav.right {
                     let dir = if nav.left { -gain } else { gain };
-                    acted = Some((cursor, Act::Set(step_value(*value, dir, *min, *max, *step))));
+                    acted = Some((w[cursor].id(), Act::Set(step_value(*value, dir, *min, *max, *step))));
                 }
                 if point.click && hovered == Some(cursor) && point.over_bar(ui.first, cursor) {
                     ui.drag = Some(cursor);
@@ -478,7 +530,7 @@ fn frame(world: &mut World) {
                     if let Some(frac) = point.bar_frac(ui.first, cursor) {
                         let v = value_at(frac, *min, *max, *step);
                         if v != *value {
-                            acted = Some((cursor, Act::Set(v)));
+                            acted = Some((w[cursor].id(), Act::Set(v)));
                         }
                     }
                 }
@@ -487,7 +539,7 @@ fn frame(world: &mut World) {
                 if nav.select || (point.click && hovered == Some(cursor)) {
                     match widget {
                         Widget::Link { page, .. } => outcome = Outcome::Open(page),
-                        _ => acted = Some((cursor, Act::Press)),
+                        _ => acted = Some((widget.id(), Act::Press)),
                     }
                 }
             }
@@ -497,8 +549,7 @@ fn frame(world: &mut World) {
             outcome = Outcome::Back;
         }
     }
-    if let Some((i, act)) = acted {
-        let widget = page.widgets[i].id();
+    if let Some((widget, act)) = acted {
         outcome = providers.iter().find_map(|p| p.act(id, widget, act, world)).unwrap_or(Outcome::Stay);
     }
     {
@@ -554,23 +605,24 @@ fn frame(world: &mut World) {
     }
     let cursor = ui.cursor;
     // Scroll so the cursor is on screen.
+    let visible = if page.graph.is_some() { GRAPH_ROWS } else { VISIBLE_ROWS };
     if cursor < ui.first {
         ui.first = cursor;
-    } else if cursor >= ui.first + VISIBLE_ROWS {
-        ui.first = cursor + 1 - VISIBLE_ROWS;
+    } else if cursor >= ui.first + visible {
+        ui.first = cursor + 1 - visible;
     }
-    ui.first = ui.first.min(page.widgets.len().saturating_sub(VISIBLE_ROWS));
+    ui.first = ui.first.min(page.widgets.len().saturating_sub(visible));
     let rows = page
         .widgets
         .iter()
         .enumerate()
         .skip(ui.first)
-        .take(VISIBLE_ROWS)
+        .take(visible)
         .map(|(i, w)| row_view(w, i == cursor))
         .collect();
     let hint = "Point + trigger, or stick + A.   B: back   Menu: close";
     let footer = if ui.status.1 > 0.0 { format!("{}\n{hint}", ui.status.0) } else { hint.to_string() };
-    ui.view = View { title: page.title, trail, rows, footer };
+    ui.view = View { title: page.title, trail, graph: page.graph, rows, footer };
 }
 
 fn row_view(w: &Widget, selected: bool) -> RowView {
@@ -617,6 +669,24 @@ struct UiValue(usize);
 pub(crate) struct UiBar(pub usize);
 #[derive(Component)]
 struct UiBarFill(usize);
+/// The graph's plot (the hit test reads its rectangle).
+#[derive(Component)]
+pub(crate) struct UiGraph;
+/// A piece of the graph.
+#[derive(Component, Clone, Copy)]
+enum GraphPart {
+    Plot,
+    Across(usize),
+    AcrossLabel(usize),
+    Down(usize),
+    DownLabel(usize),
+    /// The curve's step `i`: its fill from the zero line, and its line.
+    Fill(usize),
+    Line(usize),
+    Handle(usize),
+    HandleCore(usize),
+    HandleLabel(usize),
+}
 
 const TEAL: Color = Color::srgb(0.45, 0.9, 0.85);
 const SELECTED: Color = Color::srgb(0.12, 0.42, 0.4);
@@ -660,6 +730,71 @@ fn spawn_ui(mut commands: Commands, panel: Res<XrPanel>, assets: Res<AssetServer
             .with_children(|panel| {
                 panel.spawn((UiTitle, Text::new("SK8 AR"), heavy.clone(), TextColor(Color::WHITE)));
                 panel.spawn((UiTrail, text("", 20.0, TEAL)));
+                let part = |part: GraphPart, color: Color| {
+                    (part, Node { position_type: PositionType::Absolute, display: Display::None, ..default() }, BackgroundColor(color))
+                };
+                panel
+                    .spawn((
+                        UiGraph,
+                        GraphPart::Plot,
+                        Node {
+                            width: px(GRAPH_SIZE.x),
+                            height: px(GRAPH_SIZE.y),
+                            flex_shrink: 0.0,
+                            overflow: Overflow::clip(),
+                            border_radius: BorderRadius::all(px(8)),
+                            display: Display::None,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.07, 0.09, 0.12)),
+                    ))
+                    .with_children(|g| {
+                        for i in 0..GRAPH_LINES {
+                            g.spawn(part(GraphPart::Across(i), Color::NONE));
+                            g.spawn(part(GraphPart::Down(i), Color::NONE));
+                        }
+                        for i in 0..GRAPH_COLUMNS {
+                            g.spawn(part(GraphPart::Fill(i), Color::srgba(0.45, 0.9, 0.85, 0.22)));
+                        }
+                        for i in 0..GRAPH_COLUMNS {
+                            g.spawn(part(GraphPart::Line(i), TEAL));
+                        }
+                        for i in 0..GRAPH_LINES {
+                            for label in [GraphPart::AcrossLabel(i), GraphPart::DownLabel(i)] {
+                                g.spawn((label, text("", 17.0, DIM), Node { position_type: PositionType::Absolute, ..default() }));
+                            }
+                        }
+                        for i in 0..GRAPH_HANDLES {
+                            g.spawn((
+                                GraphPart::Handle(i),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    padding: UiRect::all(px(4)),
+                                    border_radius: BorderRadius::all(px(8)),
+                                    display: Display::None,
+                                    ..default()
+                                },
+                                BackgroundColor(Color::BLACK),
+                            ))
+                            .with_children(|h| {
+                                h.spawn((
+                                    GraphPart::HandleCore(i),
+                                    Node {
+                                        width: percent(100),
+                                        height: percent(100),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        border_radius: BorderRadius::all(px(5)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(TEAL),
+                                ))
+                                .with_children(|c| {
+                                    c.spawn((GraphPart::HandleLabel(i), text("", 17.0, Color::BLACK)));
+                                });
+                            });
+                        }
+                    });
                 for i in 0..VISIBLE_ROWS {
                     panel
                         .spawn((
@@ -777,6 +912,109 @@ fn draw(
     for (UiBarFill(i), mut node) in &mut fills {
         let frac = v.rows.get(*i).and_then(|r| r.bar).unwrap_or(0.0);
         node.width = percent(frac.clamp(0.0, 1.0) * 100.0);
+    }
+}
+
+/// The page's graph, laid out in the plot's pixels.
+fn draw_graph(
+    ui: Res<XrUi>,
+    mut drawn: Local<Option<Graph>>,
+    mut parts: Query<(&GraphPart, &mut Node, Option<&mut BackgroundColor>, Option<&mut Text>)>,
+) {
+    let graph = if ui.open && ui.external.is_none() { ui.view.graph.as_ref() } else { None };
+    if drawn.as_ref() == graph {
+        return;
+    }
+    *drawn = graph.cloned();
+    let Some(graph) = graph else {
+        for (part, mut node, ..) in &mut parts {
+            if matches!(part, GraphPart::Plot) {
+                node.display = Display::None;
+            }
+        }
+        return;
+    };
+    let (w, h) = (GRAPH_SIZE.x, GRAPH_SIZE.y);
+    let height = |i: usize| -> f32 {
+        let n = graph.curve.len();
+        if n == 0 { graph.zero } else { graph.curve[(i * n / GRAPH_COLUMNS).min(n - 1)] }.clamp(0.0, 1.0)
+    };
+    let step = w / GRAPH_COLUMNS as f32;
+    for (part, mut node, color, text) in &mut parts {
+        let mut show = true;
+        match *part {
+            GraphPart::Plot => {}
+            GraphPart::Across(i) | GraphPart::Down(i) => {
+                let across = matches!(part, GraphPart::Across(_));
+                match if across { graph.across.get(i) } else { graph.down.get(i) } {
+                    Some(&(at, _, strong)) => {
+                        let thick = if strong { 2.0 } else { 1.0 };
+                        if across {
+                            (node.left, node.top, node.width, node.height) = (px(at * w), px(0), px(thick), px(h));
+                        } else {
+                            (node.left, node.top, node.width, node.height) = (px(0), px(at * h), px(w), px(thick));
+                        }
+                        if let Some(mut color) = color {
+                            color.0 = Color::srgba(1.0, 1.0, 1.0, if strong { 0.22 } else { 0.09 });
+                        }
+                    }
+                    None => show = false,
+                }
+            }
+            GraphPart::AcrossLabel(i) | GraphPart::DownLabel(i) => {
+                let across = matches!(part, GraphPart::AcrossLabel(_));
+                let line = if across { graph.across.get(i) } else { graph.down.get(i) };
+                if let Some(&(at, _, _)) = line {
+                    // Beside its line: along the bottom, or down the left side.
+                    (node.left, node.top) = if across {
+                        (px(at * w + 5.0), px(h - 24.0))
+                    } else {
+                        (px(6), px((at * h - 22.0).max(2.0)))
+                    };
+                }
+                if let Some(mut text) = text {
+                    **text = line.map(|l| l.1.to_string()).unwrap_or_default();
+                }
+            }
+            GraphPart::Fill(i) => {
+                let (y, zero) = (height(i) * h, graph.zero * h);
+                (node.left, node.width) = (px(i as f32 * step), px(step + 0.5));
+                (node.top, node.height) = (px(y.min(zero)), px((y - zero).abs()));
+            }
+            GraphPart::Line(i) => {
+                // From the step before's height to this one's, so a steep curve stays joined.
+                let (y, before) = (height(i) * h, height(i.saturating_sub(1)) * h);
+                (node.left, node.width) = (px(i as f32 * step), px(step + 0.5));
+                (node.top, node.height) = (px(y.min(before) - 1.5), px((y - before).abs() + 3.0));
+            }
+            GraphPart::Handle(i) => match graph.handles.get(i) {
+                Some(handle) => {
+                    let size = if handle.selected { 38.0 } else { 30.0 };
+                    (node.width, node.height) = (px(size), px(size));
+                    (node.left, node.top) = (px(handle.at.x * w - size / 2.0), px(handle.at.y * h - size / 2.0));
+                    if let Some(mut color) = color {
+                        color.0 = if handle.selected { Color::WHITE } else { Color::BLACK };
+                    }
+                }
+                None => show = false,
+            },
+            GraphPart::HandleCore(i) => {
+                if let (Some(handle), Some(mut color)) = (graph.handles.get(i), color) {
+                    color.0 = handle.color;
+                }
+            }
+            GraphPart::HandleLabel(i) => {
+                if let Some(mut text) = text {
+                    **text = graph.handles.get(i).map(|h| h.label.to_string()).unwrap_or_default();
+                }
+            }
+        }
+        if !matches!(part, GraphPart::HandleCore(_) | GraphPart::HandleLabel(_) | GraphPart::AcrossLabel(_) | GraphPart::DownLabel(_)) {
+            let display = if show { Display::Flex } else { Display::None };
+            if node.display != display {
+                node.display = display;
+            }
+        }
     }
 }
 

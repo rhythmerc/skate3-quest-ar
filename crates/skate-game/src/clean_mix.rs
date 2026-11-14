@@ -115,6 +115,21 @@ fn biquad(index: usize, band: &Band, rate: f32) -> Biquad {
     Biquad { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
 }
 
+/// What the four bands together do to a tone at `freq`, dB.
+pub(crate) fn response_db(bands: &[Band; BANDS], rate: f32, freq: f32) -> f32 {
+    let w = std::f64::consts::TAU * f64::from(freq) / f64::from(rate);
+    let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+    let mut db = 0.0;
+    for (i, band) in bands.iter().enumerate().filter(|(_, band)| band.gain != 0.0) {
+        let q = biquad(i, band, rate);
+        let (b0, b1, b2, a1, a2) = (f64::from(q.b0), f64::from(q.b1), f64::from(q.b2), f64::from(q.a1), f64::from(q.a2));
+        let above = (b0 + b1 * c1 + b2 * c2).powi(2) + (b1 * s1 + b2 * s2).powi(2);
+        let below = (1.0 + a1 * c1 + a2 * c2).powi(2) + (a1 * s1 + a2 * s2).powi(2);
+        db += 10.0 * (above / below.max(1e-30)).max(1e-30).log10();
+    }
+    db as f32
+}
+
 /// One kind's level (linear; 0 while another is soloed) and EQ.
 pub(crate) struct Strip {
     set: Mutex<(f32, [Band; BANDS])>,
@@ -274,6 +289,12 @@ mod tests {
         assert!((level_at(40.0, &strip) + 12.0).abs() < 0.6, "{}", level_at(40.0, &strip));
         assert!(level_at(1000.0, &strip).abs() < 1.0, "{}", level_at(1000.0, &strip));
         assert!((level_at(15000.0, &strip) - 6.0).abs() < 0.6, "{}", level_at(15000.0, &strip));
+        // The picture of it (the sound lab's graph) is what is heard.
+        for freq in [40.0, 200.0, 1000.0, 5000.0, 15000.0] {
+            let (drawn, heard) = (response_db(&bands, 48_000.0, freq), level_at(freq, &strip));
+            assert!((drawn - heard).abs() < 0.1, "{freq}: {drawn} drawn, {heard} heard");
+        }
+        assert_eq!(response_db(&FLAT, 48_000.0, 1000.0), 0.0);
         // The level, and a soloed neighbour's silence.
         strip.set(0.5, FLAT);
         assert!((level_at(1000.0, &strip) + 6.02).abs() < 0.1);
