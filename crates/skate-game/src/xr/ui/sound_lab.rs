@@ -56,7 +56,7 @@ fn band_at(at: Vec2, q: f32) -> Band {
     Band { freq: (freq / step).round() * step, gain: gain.clamp(-EQ_DB, EQ_DB), q }
 }
 
-fn eq_graph(eq: &[Band; BANDS], selected: usize) -> Graph {
+pub(super) fn eq_graph(eq: &[Band; BANDS], selected: usize) -> Graph {
     let line = |hz: f32, label: &'static str| (to_log(hz, EQ_HZ), label, !label.is_empty());
     let level = |db: f32, label: &'static str| (0.5 - db / (2.0 * EQ_DB), label, db == 0.0);
     Graph {

@@ -39,6 +39,12 @@ pub(crate) struct XrPanel {
 }
 
 impl XrPanel {
+    /// A panel drawn by `camera`, for a test that renders the menus without a headset.
+    #[cfg(test)]
+    pub(crate) fn drawn_by(camera: Entity) -> Self {
+        Self { camera, visible: true, recenter: false, pose: Transform::default() }
+    }
+
     /// Tracking-space pose of the quad: its front (+Z) faces the player,
     /// +X is their right.
     pub(crate) fn pose(&self) -> Transform {

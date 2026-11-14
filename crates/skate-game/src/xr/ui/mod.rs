@@ -33,7 +33,7 @@ const VISIBLE_ROWS: usize = 13;
 /// And under a page's graph.
 const GRAPH_ROWS: usize = 8;
 /// A graph's plot, panel pixels.
-pub(crate) const GRAPH_SIZE: Vec2 = Vec2::new(916.0, 250.0);
+pub(crate) const GRAPH_SIZE: Vec2 = Vec2::new(916.0, 290.0);
 /// How many steps a graph's curve is drawn in.
 pub(crate) const GRAPH_COLUMNS: usize = 229;
 const GRAPH_LINES: usize = 10;
@@ -738,7 +738,8 @@ fn spawn_ui(mut commands: Commands, panel: Res<XrPanel>, assets: Res<AssetServer
                         UiGraph,
                         GraphPart::Plot,
                         Node {
-                            width: px(GRAPH_SIZE.x),
+                            // (the panel's width: a width in pixels here makes the panel twice as tall)
+                            width: percent(100),
                             height: px(GRAPH_SIZE.y),
                             flex_shrink: 0.0,
                             overflow: Overflow::clip(),
@@ -1021,6 +1022,101 @@ fn draw_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_with_a_graph_shows_it() {
+        let mut world = World::new();
+        let plot = world.spawn((GraphPart::Plot, Node { display: Display::None, ..default() })).id();
+        let fill = world.spawn((GraphPart::Fill(3), Node { display: Display::None, ..default() }, BackgroundColor(TEAL))).id();
+        let handle = world.spawn((GraphPart::Handle(0), Node { display: Display::None, ..default() }, BackgroundColor(TEAL))).id();
+        let graph = Graph {
+            id: "g",
+            curve: vec![0.25; GRAPH_COLUMNS],
+            zero: 0.5,
+            handles: vec![GraphHandle { at: Vec2::splat(0.5), label: "L", color: TEAL, selected: true }],
+            ..default()
+        };
+        world.insert_resource(XrUi { open: true, view: View { graph: Some(graph), ..default() }, ..default() });
+        let mut schedule = Schedule::default();
+        schedule.add_systems(draw_graph);
+        schedule.run(&mut world);
+        let node = |world: &World, e| world.get::<Node>(e).unwrap().clone();
+        assert_eq!(node(&world, plot).display, Display::Flex);
+        assert_eq!(node(&world, fill).height, px(GRAPH_SIZE.y * 0.25));
+        assert_eq!(node(&world, handle).left, px(GRAPH_SIZE.x * 0.5 - 19.0));
+        world.resource_mut::<XrUi>().view.graph = None;
+        schedule.run(&mut world);
+        assert_eq!(node(&world, plot).display, Display::None);
+    }
+
+    /// The EQ page as the headset draws it, saved as a picture to look at:
+    /// `SK8_UI_SHOT=/path/eq.png cargo test ... a_picture_of_the_eq_page -- --ignored`
+    #[test]
+    #[ignore = "needs a GPU; writes a picture"]
+    fn a_picture_of_the_eq_page() {
+        use bevy::camera::RenderTarget;
+        use bevy::render::render_resource::TextureFormat;
+        use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+        use crate::clean_mix::{Band, FLAT};
+        let Some(path) = std::env::var_os("SK8_UI_SHOT") else { return };
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .build()
+                .disable::<bevy::winit::WinitPlugin>()
+                .set(WindowPlugin { primary_window: None, exit_condition: bevy::window::ExitCondition::DontExit, ..default() }),
+        );
+        crate::clean::embed_font(&mut app);
+        let image = Image::new_target_texture(super::super::panel::WIDTH_PX, super::super::panel::HEIGHT_PX, TextureFormat::Rgba8UnormSrgb, None);
+        let image = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+        let camera = app
+            .world_mut()
+            .spawn((Camera2d, Camera { clear_color: ClearColorConfig::Custom(Color::srgb(0.3, 0.3, 0.3)), ..default() }, RenderTarget::Image(image.clone().into())))
+            .id();
+        app.insert_resource(XrPanel::drawn_by(camera));
+        let mut eq = FLAT;
+        eq[0].gain = -9.0;
+        eq[1] = Band { freq: 700.0, gain: 8.0, q: 2.5 };
+        eq[3].gain = 4.0;
+        let widgets = [
+            Widget::slider("a", "Sound", 0.0, (0.0, 14.0, 1.0), "roll smooth"),
+            Widget::toggle("b", "Hold it playing", true),
+            Widget::toggle("c", "Solo (the other sounds are muted)", false),
+            Widget::slider("d", "Band (or grab one on the graph)", 1.0, (0.0, 3.0, 1.0), "Peak 1"),
+            Widget::slider("e", "Peak 1: sharpness (Q)", 0.6, (0.0, 1.0, 0.005), "2.50"),
+            Widget::slider("f", "Peak 1: at", 0.5, (0.0, 1.0, 0.005), "700 Hz"),
+            Widget::slider("g", "Peak 1: gain", 8.0, (-18.0, 18.0, 0.5), "+8.0 dB"),
+            Widget::button("h", "Flat"),
+        ];
+        let view = View {
+            title: "EQ".into(),
+            trail: "SK8 AR  >  Sound lab  >  EQ".into(),
+            graph: Some(sound_lab::eq_graph(&eq, 1)),
+            rows: widgets.iter().enumerate().map(|(i, w)| row_view(w, i == 4)).collect(),
+            footer: "Point + trigger, or stick + A.   B: back   Menu: close".into(),
+        };
+        app.insert_resource(XrUi { open: true, view, ..default() });
+        app.add_systems(Startup, spawn_ui).add_systems(Update, (draw, draw_graph).chain());
+        app.finish();
+        app.cleanup();
+        for _ in 0..30 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The whole page is on the panel, and the plot is the size the laser's arithmetic takes it for.
+        let mut plots = app.world_mut().query_filtered::<(&ComputedNode, &UiGlobalTransform), With<UiGraph>>();
+        let (plot, at) = plots.single(app.world()).map(|(node, at)| (node.size(), at.translation)).unwrap();
+        assert_eq!(plot, GRAPH_SIZE);
+        let mut rows = app.world_mut().query::<(&UiRow, &ComputedNode, &UiGlobalTransform)>();
+        let lowest = rows.iter(app.world()).filter(|(_, node, _)| node.size().y > 0.0).map(|(_, node, at)| at.translation.y + node.size().y / 2.0).fold(0.0, f32::max);
+        let height = super::super::panel::HEIGHT_PX as f32;
+        assert!(at.y - plot.y / 2.0 > 60.0 && lowest < height - 30.0, "plot at {}, rows to {lowest}", at.y);
+        app.world_mut().spawn(Screenshot::image(image)).observe(save_to_disk(std::path::PathBuf::from(path)));
+        for _ in 0..30 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn sliders_clamp_and_snap() {
