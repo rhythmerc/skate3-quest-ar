@@ -331,6 +331,9 @@ pub(crate) struct Ramp {
     /// It is drawn open at the back of its decks, on a frame (it is ridden
     /// as the solid it was).
     pub hollow: bool,
+    /// Its sheets' edges show round every edge of it, not only under the
+    /// surface that is ridden.
+    pub trimmed: bool,
 }
 
 /// A rail's post: a box, kept track of in [`PieceGeometry::posts`].
@@ -548,6 +551,9 @@ impl Piece {
                 profile.extend(transition(z0 + deck, radius, 1.0));
                 extrude(&mut g, &profile, width);
                 coping(&mut g, z0 + deck, radius, width, true);
+                if let Some(ramp) = g.ramp.as_mut() {
+                    ramp.trimmed = true;
+                }
             }
             PieceKind::HalfPipe => {
                 // (its width is the flat between its two transitions, which keep their shape)

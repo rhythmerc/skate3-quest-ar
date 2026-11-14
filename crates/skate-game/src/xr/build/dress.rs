@@ -297,8 +297,8 @@ pub(super) fn details(g: &PieceGeometry, wooden: bool) -> Option<Dressed> {
             out.quad([at(-x, here - run) + up, at(x, here - run) + up, at(x, here + run) + up, at(-x, here + run) + up], out_of(stretches[i]), seam);
         }
 
-        // The sheets' edges, round each side: under the ridden surface, along the ground, and up
-        // each end that stands off it.
+        // The sheets' edges, down each side under the ridden surface; on a ramp trimmed all
+        // round, along the ground and up each end that stands off it too.
         for side in [-x, x] {
             let normal = Vec3::X * side.signum();
             let off = side + side.signum() * LIFT_M;
@@ -309,17 +309,19 @@ pub(super) fn details(g: &PieceGeometry, wooden: bool) -> Option<Dressed> {
             let over = |i: usize| Vec2::new(profile[i].x, profile[i].y.min(EDGE_M));
             for i in 0..profile.len() - 1 {
                 out.quad([at(off, profile[i]), at(off, profile[i + 1]), at(off, under(i + 1)), at(off, under(i))], normal, edge);
-                let (a, b) = (profile[i].with_y(0.0), profile[i + 1].with_y(0.0));
-                out.quad([at(off, a), at(off, b), at(off, over(i + 1)), at(off, over(i))], normal, edge);
+                if ramp.trimmed {
+                    let (a, b) = (profile[i].with_y(0.0), profile[i + 1].with_y(0.0));
+                    out.quad([at(off, a), at(off, b), at(off, over(i + 1)), at(off, over(i))], normal, edge);
+                }
             }
-            for (z, out_z, height) in backs(ramp) {
+            for (z, out_z, height) in backs(ramp).into_iter().filter(|_| ramp.trimmed) {
                 let inner = z - out_z * EDGE_M;
                 out.quad([Vec3::new(off, 0.0, z), Vec3::new(off, height, z), Vec3::new(off, height, inner), Vec3::new(off, 0.0, inner)], normal, edge);
             }
         }
         // And round the wall that closes each such end (a hollow ramp has none), with the seams
         // between its sheets.
-        for (z, out_z, height) in backs(ramp).into_iter().filter(|_| !ramp.hollow) {
+        for (z, out_z, height) in backs(ramp).into_iter().filter(|_| ramp.trimmed && !ramp.hollow) {
             let normal = Vec3::Z * out_z;
             let off = z + out_z * LIFT_M;
             let mut band = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]| {
@@ -437,6 +439,21 @@ mod tests {
         // A quarter pipe is closed.
         let quarter = Piece::new(PieceKind::QuarterPipe).geometry();
         assert!(!quarter.ramp.as_ref().unwrap().hollow);
+    }
+
+    #[test]
+    fn only_a_quarter_pipe_is_trimmed_round_every_edge() {
+        // Trim on the back wall, and along the ground down the sides: the quarter pipe's alone.
+        let on_the_back = |kind| {
+            let g = Piece::new(kind).geometry();
+            let end = g.ramp.as_ref().unwrap().profile[0].x;
+            details(&g, true).unwrap().positions.chunks_exact(3).filter(|t| t.iter().all(|p| p[2] < end - 1e-4)).count()
+        };
+        assert!(on_the_back(PieceKind::QuarterPipe) > 0);
+        for kind in [PieceKind::Kicker, PieceKind::HalfPipe, PieceKind::Bank] {
+            assert_eq!(on_the_back(kind), 0, "{kind:?}");
+            assert!(!Piece::new(kind).geometry().ramp.unwrap().trimmed);
+        }
     }
 
     #[test]
