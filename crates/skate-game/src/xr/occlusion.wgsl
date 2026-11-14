@@ -83,7 +83,17 @@ fn spline(f: f32) -> vec4<f32> {
 
 @fragment
 fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+#ifdef MULTISAMPLED
+    // The nearest of the pixel's samples. (With only the first looked at, a
+    // pixel on a thing's edge whose first sample missed the thing kept its
+    // share of the thing's colour: hidden things showed as dotted outlines.)
+    var depth = 0.0;
+    for (var s = 0; s < i32(textureNumSamples(scene_depth)); s++) {
+        depth = max(depth, textureLoad(scene_depth, vec2<i32>(position.xy), s));
+    }
+#else
     let depth = textureLoad(scene_depth, vec2<i32>(position.xy), 0);
+#endif
     // Nothing solid here (the menu and other see-through things are left alone).
     if depth <= 0.0 {
         return vec4(1.0);
