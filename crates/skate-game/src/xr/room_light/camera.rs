@@ -37,6 +37,32 @@ const IDLE_EVERY: Duration = Duration::from_millis(500);
 const MAX_FAILURES: u32 = 3;
 const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
 
+/// Something else has the camera for a while (the developer's occlusion
+/// capture): room lighting's stream is closed until it is given back.
+pub(crate) static BORROWED: AtomicBool = AtomicBool::new(false);
+
+/// Which of the camera's stream sizes to open.
+#[derive(Clone, Copy)]
+pub(crate) enum Pick {
+    /// The smallest square one, at the lowest frame rate (room lighting).
+    SmallestSquare,
+    /// The largest no wider than this, at the highest frame rate.
+    UpTo(i32),
+}
+
+/// A frame as it came, packed: the Y plane, then U and V at half the size
+/// each way.
+pub(crate) struct Packed {
+    pub width: usize,
+    pub height: usize,
+    /// The sensor's time for the frame, on the camera's clock.
+    pub timestamp_ns: i64,
+    /// The latest result's (0: none yet).
+    pub exposure_ns: i64,
+    pub iso: i32,
+    pub data: Vec<u8>,
+}
+
 pub(super) fn spawn(feed: Arc<Feed>, room: Arc<Mutex<Room>>) {
     let result = std::thread::Builder::new().name("sk8-room-light".into()).spawn(move || run(&feed, &room));
     if let Err(e) = result {
@@ -54,7 +80,7 @@ fn run(feed: &Feed, room: &Mutex<Room>) {
     let mut usable_from = Instant::now();
     let mut black_logged: Option<Instant> = None;
     loop {
-        if !feed.wanted() {
+        if !feed.wanted() || BORROWED.load(Ordering::Relaxed) {
             if stream.take().is_some() {
                 info!("Room light: camera closed");
             }
@@ -75,7 +101,7 @@ fn run(feed: &Feed, room: &Mutex<Room>) {
                 feed.set_state(CameraState::NoCamera);
             } else {
                 feed.set_state(CameraState::Starting);
-                match Stream::open() {
+                match Stream::open(Pick::SmallestSquare) {
                     Ok(opened) => {
                         info!("Room light: camera {} at {}x{}", opened.id, opened.camera.width, opened.camera.height);
                         room.lock().unwrap().set_camera(&opened.camera);
@@ -135,9 +161,11 @@ struct Shared {
 
 /// An open camera streaming into an image reader. Dropping it closes
 /// everything, in the order Camera2 wants.
-struct Stream {
+pub(crate) struct Stream {
     id: String,
     camera: Camera,
+    /// The camera as Camera2 describes it, for a capture's notes.
+    pub(crate) calibration: serde_json::Value,
     shared: Arc<Shared>,
     manager: *mut sys::ACameraManager,
     device: *mut sys::ACameraDevice,
@@ -221,6 +249,11 @@ unsafe fn entry_i32<'a>(metadata: *const sys::ACameraMetadata, tag: sys::acamera
     Some(unsafe { std::slice::from_raw_parts(e.data.i32_, e.count as usize) })
 }
 
+unsafe fn entry_u8<'a>(metadata: *const sys::ACameraMetadata, tag: sys::acamera_metadata_tag) -> Option<&'a [u8]> {
+    let e = unsafe { entry(metadata, tag) }.filter(|e| e.type_ == 0)?;
+    Some(unsafe { std::slice::from_raw_parts(e.data.u8_, e.count as usize) })
+}
+
 unsafe fn entry_f32<'a>(metadata: *const sys::ACameraMetadata, tag: sys::acamera_metadata_tag) -> Option<&'a [f32]> {
     let e = unsafe { entry(metadata, tag) }.filter(|e| e.type_ == 2)?;
     Some(unsafe { std::slice::from_raw_parts(e.data.f, e.count as usize) })
@@ -240,7 +273,7 @@ fn media_ok(status: sys::media_status_t, what: &str) -> Result<(), String> {
 }
 
 impl Stream {
-    fn open() -> Result<Self, String> {
+    pub(crate) fn open(pick: Pick) -> Result<Self, String> {
         use sys::acamera_metadata_tag as tag;
         // The left passthrough camera, by Meta's vendor tags (the entry point
         // looks it up: the NDK can't read a vendor tag by its name).
@@ -251,6 +284,7 @@ impl Stream {
         let mut stream = Stream {
             id,
             camera: Camera::default(),
+            calibration: serde_json::Value::Null,
             shared,
             manager: unsafe { sys::ACameraManager_create() },
             device: null_mut(),
@@ -292,14 +326,17 @@ impl Stream {
             unsafe { sys::ACameraManager_getCameraCharacteristics(stream.manager, c_id.as_ptr(), &mut characteristics) },
             "characteristics",
         )?;
-        let described = unsafe { describe(characteristics) };
+        let described = unsafe { describe(characteristics, pick) };
         unsafe { sys::ACameraMetadata_free(characteristics) };
-        let (camera, fps) = described?;
+        let (camera, fps, calibration) = described?;
         stream.camera = camera;
+        stream.calibration = calibration;
+        // (a capture reads every frame, and may be a few behind)
+        let images = if matches!(pick, Pick::SmallestSquare) { 2 } else { 6 };
 
         unsafe {
             media_ok(
-                sys::AImageReader_new(camera.width, camera.height, AIMAGE_FORMAT_YUV_420_888, 2, &mut stream.reader),
+                sys::AImageReader_new(camera.width, camera.height, AIMAGE_FORMAT_YUV_420_888, images, &mut stream.reader),
                 "image reader",
             )?;
             let mut window = null_mut();
@@ -353,6 +390,45 @@ impl Stream {
         Ok(stream)
     }
 
+    /// The next frame, packed; none when there isn't one yet.
+    pub(crate) fn next_packed(&mut self) -> Option<Packed> {
+        unsafe {
+            let mut image = null_mut();
+            if sys::AImageReader_acquireNextImage(self.reader, &mut image) != sys::media_status_t::AMEDIA_OK || image.is_null() {
+                return None;
+            }
+            let (mut width, mut height, mut timestamp_ns) = (0, 0, 0i64);
+            sys::AImage_getWidth(image, &mut width);
+            sys::AImage_getHeight(image, &mut height);
+            sys::AImage_getTimestamp(image, &mut timestamp_ns);
+            let (width, height) = (width.max(0) as usize, height.max(0) as usize);
+            let mut data = Vec::with_capacity(width * height * 3 / 2);
+            for (index, across, down) in [(0, width, height), (1, width / 2, height / 2), (2, width / 2, height / 2)] {
+                let (mut bytes, mut length, mut row, mut pixel) = (null_mut(), 0, 0, 0);
+                let ok = sys::AImage_getPlaneData(image, index, &mut bytes, &mut length) == sys::media_status_t::AMEDIA_OK
+                    && sys::AImage_getPlaneRowStride(image, index, &mut row) == sys::media_status_t::AMEDIA_OK
+                    && sys::AImage_getPlanePixelStride(image, index, &mut pixel) == sys::media_status_t::AMEDIA_OK;
+                // (Valid until the image is deleted, below.)
+                let plane: &[u8] = if ok && !bytes.is_null() && length > 0 { std::slice::from_raw_parts(bytes, length as usize) } else { &[] };
+                let (row, pixel) = (row.max(0) as usize, pixel.max(1) as usize);
+                for y in 0..down {
+                    for x in 0..across {
+                        data.push(plane.get(y * row + x * pixel).copied().unwrap_or(0));
+                    }
+                }
+            }
+            sys::AImage_delete(image);
+            Some(Packed {
+                width,
+                height,
+                timestamp_ns,
+                exposure_ns: self.shared.exposure_ns.load(Ordering::Relaxed),
+                iso: self.shared.iso.load(Ordering::Relaxed),
+                data,
+            })
+        }
+    }
+
     /// Reduces the newest frame into `cells`; false when there is none yet.
     fn latest(&mut self, linear: &[f32; 256], cells: &mut [f32]) -> bool {
         unsafe {
@@ -390,9 +466,13 @@ impl Stream {
     }
 }
 
-/// The camera's calibration with its smallest square stream size, and its
-/// slowest frame rate range.
-unsafe fn describe(characteristics: *const sys::ACameraMetadata) -> Result<(Camera, Option<[i32; 2]>), String> {
+/// The camera's calibration with the stream size picked and its frame rate
+/// range (the slowest for room lighting, the fastest for a capture), and
+/// all of it as Camera2 gives it, for a capture's notes.
+unsafe fn describe(
+    characteristics: *const sys::ACameraMetadata,
+    pick: Pick,
+) -> Result<(Camera, Option<[i32; 2]>, serde_json::Value), String> {
     use sys::acamera_metadata_tag as tag;
     let rotation = unsafe { entry_f32(characteristics, tag::ACAMERA_LENS_POSE_ROTATION) }.filter(|r| r.len() >= 4);
     let intrinsics = unsafe { entry_f32(characteristics, tag::ACAMERA_LENS_INTRINSIC_CALIBRATION) }.filter(|i| i.len() >= 4);
@@ -404,14 +484,43 @@ unsafe fn describe(characteristics: *const sys::ACameraMetadata) -> Result<(Came
     };
     // (format, width, height, is input) each.
     let sizes = unsafe { entry_i32(characteristics, tag::ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS) }.unwrap_or(&[]);
-    let side = sizes
-        .chunks_exact(4)
-        .filter(|c| c[0] == AIMAGE_FORMAT_YUV_420_888 && c[3] == 0 && c[1] == c[2] && c[1] >= (GRID * 5) as i32)
-        .map(|c| c[1])
-        .min()
-        .ok_or("the camera has no square size")?;
-    let fps = unsafe { entry_i32(characteristics, tag::ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }
-        .and_then(|ranges| ranges.chunks_exact(2).min_by_key(|r| r[1]).map(|r| [r[0], r[1]]));
+    let outputs = || sizes.chunks_exact(4).filter(|c| c[0] == AIMAGE_FORMAT_YUV_420_888 && c[3] == 0);
+    let (width, height) = match pick {
+        Pick::SmallestSquare => outputs()
+            .filter(|c| c[1] == c[2] && c[1] >= (GRID * 5) as i32)
+            .map(|c| (c[1], c[2]))
+            .min()
+            .ok_or("the camera has no square size")?,
+        Pick::UpTo(widest) => outputs()
+            .filter(|c| c[1] <= widest)
+            .map(|c| (c[1], c[2]))
+            .max_by_key(|&(w, h)| w as i64 * h as i64)
+            .ok_or("the camera has no size that small")?,
+    };
+    let ranges = unsafe { entry_i32(characteristics, tag::ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }.unwrap_or(&[]);
+    let fps = match pick {
+        Pick::SmallestSquare => ranges.chunks_exact(2).min_by_key(|r| r[1]),
+        Pick::UpTo(_) => ranges.chunks_exact(2).max_by_key(|r| (r[1], r[0])),
+    }
+    .map(|r| [r[0], r[1]]);
+    let floats = |t: sys::acamera_metadata_tag| unsafe { entry_f32(characteristics, t) }.map(|v| v.to_vec());
+    let ints = |t: sys::acamera_metadata_tag| unsafe { entry_i32(characteristics, t) }.map(|v| v.to_vec());
+    let byte = |t: sys::acamera_metadata_tag| unsafe { entry_u8(characteristics, t) }.map(|v| v.to_vec());
+    let calibration = serde_json::json!({
+        "lens_pose_rotation": floats(tag::ACAMERA_LENS_POSE_ROTATION),
+        "lens_pose_translation": floats(tag::ACAMERA_LENS_POSE_TRANSLATION),
+        "lens_pose_reference": byte(tag::ACAMERA_LENS_POSE_REFERENCE),
+        "lens_intrinsic_calibration": floats(tag::ACAMERA_LENS_INTRINSIC_CALIBRATION),
+        "lens_distortion": floats(tag::ACAMERA_LENS_DISTORTION),
+        "pre_correction_active_array": ints(tag::ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE),
+        "active_array": ints(tag::ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+        "pixel_array": ints(tag::ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE),
+        "timestamp_source": byte(tag::ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE),
+        "stream_configurations": sizes,
+        "fps_ranges": ranges,
+        "stream": [width, height],
+        "fps": fps,
+    });
     let camera = Camera {
         lens_rotation: Quat { x: rotation[0], y: rotation[1], z: rotation[2], w: rotation[3] },
         fx: intrinsics[0],
@@ -420,8 +529,8 @@ unsafe fn describe(characteristics: *const sys::ACameraMetadata) -> Result<(Came
         cy: intrinsics[3],
         sensor_width: array[2],
         sensor_height: array[3],
-        width: side,
-        height: side,
+        width,
+        height,
     };
-    Ok((camera, fps))
+    Ok((camera, fps, calibration))
 }

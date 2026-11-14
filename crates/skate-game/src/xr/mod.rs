@@ -17,6 +17,7 @@ pub(crate) mod ar_settings;
 pub(crate) mod build;
 pub(crate) mod link;
 pub(crate) mod occlusion;
+pub(crate) mod occlusion_capture;
 mod mesh_planes;
 pub(crate) mod panel;
 mod plane_view;

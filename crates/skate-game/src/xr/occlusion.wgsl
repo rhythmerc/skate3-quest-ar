@@ -15,9 +15,6 @@ struct Eye {
     hole_count: u32,
     // How far under a mouth's height counts as in the bowl (world units).
     below: f32,
-    // 1: one sample of the room's image a pixel (hard edges, quick). 2: one
-    // of its filtered image (soft). 0: sixteen of the image (the old soft).
-    mode: u32,
     // The mouths of the bowls sunk into real surfaces: the centre (world), and the radius.
     holes: array<vec4<f32>, 4>,
 }
@@ -28,16 +25,10 @@ struct Eye {
 #else
 @group(0) @binding(1) var scene_depth: texture_depth_2d;
 #endif
-@group(0) @binding(2) var room_depth: texture_depth_2d_array;
-@group(0) @binding(3) var<uniform> eye: Eye;
+@group(0) @binding(2) var<uniform> eye: Eye;
 // The room's image filtered (occlusion_filter.wgsl), read between its texels.
-@group(0) @binding(4) var room_filtered: texture_2d_array<f32>;
-@group(0) @binding(5) var room_sampler: sampler;
-
-// How far along the room's view the real surface at a texel is, metres (0: unknown).
-fn room_distance(texel: vec2<i32>, size: vec2<i32>) -> f32 {
-    return metres(textureLoad(room_depth, clamp(texel, vec2(0), size - 1), i32(eye.layer), 0));
-}
+@group(0) @binding(3) var room_filtered: texture_2d_array<f32>;
+@group(0) @binding(4) var room_sampler: sampler;
 
 // A value of the room's image as metres along its view (0: unknown).
 fn metres(d: f32) -> f32 {
@@ -51,7 +42,7 @@ fn metres(d: f32) -> f32 {
     return eye.near * eye.far / (eye.far - d * (eye.far - eye.near));
 }
 
-// Soft occlusion as Meta's shaders do it: one read of the filtered image,
+// Occlusion as Meta's soft shaders do it: one read of the filtered image,
 // between its texels, and the pixel tested against the means there. On a
 // flat patch that is the mean of sixteen texels, far steadier than any
 // one; at an edge, the near things' answer and the far things', mixed by
@@ -72,13 +63,6 @@ fn seen(real: f32, drawn: f32) -> f32 {
         return 1.0;
     }
     return 1.0 - smoothstep(real * 1.02, real * 1.08 + 0.01, drawn);
-}
-
-// The cubic B-spline's weights for the four texels about a point `f` of
-// the way from the second to the third (they add up to 1).
-fn spline(f: f32) -> vec4<f32> {
-    let g = 1.0 - f;
-    return vec4(g * g * g, 3.0 * f * f * f - 6.0 * f * f + 4.0, 3.0 * g * g * g - 6.0 * g * g + 4.0, f * f * f) / 6.0;
 }
 
 @fragment
@@ -128,29 +112,6 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if any(image < vec2(0.0)) || any(image > vec2(1.0)) {
         return vec4(1.0);
     }
-    let size = vec2<i32>(textureDimensions(room_depth).xy);
-    if eye.mode == 2u {
-        return vec4(seen_softly(image, size, ahead));
-    }
-    if eye.mode == 1u {
-        // The texel the pixel is in, and no other: edges step along the room's texels.
-        return vec4(seen(room_distance(vec2<i32>(floor(image * vec2<f32>(size))), size), ahead));
-    }
-    let texel = image * vec2<f32>(size) - 0.5;
-    let base = vec2<i32>(floor(texel));
-    // The room's image is far coarser than the picture (a texel is some
-    // seven pixels across): each texel's answer is blended with a cubic
-    // B-spline over the sixteen about the pixel, which has no steps where
-    // the pixel passes from one texel to the next, so edges are feathered
-    // over about two texels, not jagged along them.
-    let f = texel - vec2<f32>(base);
-    let wx = spline(f.x);
-    let wy = spline(f.y);
-    var shown = 0.0;
-    for (var y = 0; y < 4; y++) {
-        for (var x = 0; x < 4; x++) {
-            shown += wx[x] * wy[y] * seen(room_distance(base + vec2(x - 1, y - 1), size), ahead);
-        }
-    }
-    return vec4(shown);
+    let size = vec2<i32>(textureDimensions(room_filtered).xy);
+    return vec4(seen_softly(image, size, ahead));
 }

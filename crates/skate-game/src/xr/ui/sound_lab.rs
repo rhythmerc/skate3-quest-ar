@@ -87,7 +87,7 @@ pub(super) fn eq_graph(eq: &[Band; BANDS], selected: usize) -> Graph {
 
 pub(crate) struct SoundLabPages;
 
-fn dev(world: &World) -> bool {
+pub(super) fn dev(world: &World) -> bool {
     world.resource::<ArSettings>().dev || std::env::var_os("SK8_DEV").is_some()
 }
 

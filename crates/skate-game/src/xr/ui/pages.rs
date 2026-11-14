@@ -280,14 +280,18 @@ fn ar_widgets(world: &World) -> Vec<Widget> {
     if let Some(problem) = world.resource::<RoomLight>().problem(s.room_light) {
         w.push(Widget::info(problem));
     }
-    w.push(Widget::button("occlusion", format!("Real things hide the skater and park: {}", s.occlusion.name())));
-    match (s.occlusion, *world.resource::<crate::xr::occlusion::OcclusionProblem>().0.lock().unwrap()) {
-        (crate::xr::occlusion::Occlusion::Off, _) => {}
-        (_, Some(problem)) => w.push(Widget::info(problem)),
-        (crate::xr::occlusion::Occlusion::SoftLegacy, _) => {
-            w.push(Widget::info("Uses the headset's depth sensing. The old soft edges, which cost frames: here to compare."))
+    w.push(Widget::toggle("occlusion", "Real things hide the skater and park", s.occlusion.on()));
+    if s.occlusion.on() {
+        let problem = *world.resource::<crate::xr::occlusion::OcclusionProblem>().0.lock().unwrap();
+        w.push(Widget::info(problem.unwrap_or("Uses the headset's depth sensing.")));
+        // (developers: what occlusion works from, saved to work on at a desk)
+        if super::sound_lab::dev(world) {
+            w.push(Widget::button("occlusion_capture", format!("Record an occlusion capture ({} s)", crate::xr::occlusion_capture::SECONDS)));
+            let status = world.resource::<crate::xr::occlusion_capture::Capture>().status();
+            if !status.is_empty() {
+                w.push(Widget::info(status));
+            }
         }
-        _ => w.push(Widget::info("Uses the headset's depth sensing.")),
     }
     w.extend([
         Widget::toggle("hud", "Trick and points readout", s.hud),
@@ -302,6 +306,23 @@ fn ar_act(widget: &str, world: &mut World) -> Outcome {
         "scan" => {
             world.resource_mut::<SceneCapture>().requested = true;
             return Outcome::Say("Starting Space Setup".into());
+        }
+        "occlusion_capture" => {
+            let folder = world.resource::<crate::xr::XrFiles>().0.join("captures").join(
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()).to_string(),
+            );
+            let root = world.resource::<crate::xr::rig::Rig>().root_transform();
+            let start = serde_json::json!({
+                "kind": "start",
+                "world_from_tracking": root.map(|r| r.to_matrix().to_cols_array()),
+                // (the room's surfaces, in the game's world)
+                "room_quads": world.resource::<crate::xr::link::ArWorld>().room_quads.iter().map(|q| q.map(|p| p.to_array())).collect::<Vec<_>>(),
+            });
+            let said = match world.resource::<crate::xr::occlusion_capture::Capture>().start(folder, start) {
+                Ok(()) => "Recording: look at edges that go wrong".to_string(),
+                Err(why) => why,
+            };
+            return Outcome::Say(said);
         }
         "intro" => {
             edit(world, |s| s.onboarding_done = false);
@@ -322,7 +343,7 @@ fn ar_act(widget: &str, world: &mut World) -> Outcome {
         "hide_all" => s.set_all_shown(false),
         "hud" => s.hud = !s.hud,
         "room_light" => s.room_light = !s.room_light,
-        "occlusion" => s.occlusion = s.occlusion.next(),
+        "occlusion" => s.occlusion = s.occlusion.toggled(),
         _ => {}
     });
     // The room's light is read from a passthrough camera: ask for it once.

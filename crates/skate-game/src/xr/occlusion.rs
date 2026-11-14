@@ -4,15 +4,13 @@
 //! eye view takes out the pixels whose place in the room is behind what is
 //! really there (`occlusion.wgsl`).
 //!
-//! Off unless the AR settings turn it on (the pass costs GPU time). Hard:
-//! one depth sample a pixel, the cheap one, its edges stepped along the
-//! depth image's texels. Soft: the way Meta's own shaders do it, each new
-//! depth image filtered once (`occlusion_filter.wgsl`: the means of the
-//! sixteen texels about each) and read once a pixel, which is steadier
-//! from frame to frame and nearly as cheap. Soft, legacy: what soft was
-//! before, sixteen samples a pixel, kept to tell the two apart. Only solid things are hidden: the
-//! menu, the build legend and other see-through draws write no depth and
-//! stay in front of everything.
+//! Off unless the AR settings turn it on (the pass costs GPU time). It is
+//! done the way Meta's own soft occlusion shaders do it: each depth image
+//! is filtered first (`occlusion_filter.wgsl`: the means of the sixteen
+//! texels about each), and a pixel is tested once against those means,
+//! read between texels. Only solid things are hidden: the menu, the build
+//! legend and other see-through draws write no depth and stay in front of
+//! everything.
 //!
 //! A bowl is under the real surface it is sunk into, which would hide all
 //! of it: what is drawn below a bowl's mouth is instead hidden only by what
@@ -22,6 +20,7 @@
 //! left running until the app closes: stopped and started again, the
 //! headset's images came back wrong.
 use super::ar_settings::ArSettings;
+use super::occlusion_capture::{Capture, Readbacks};
 use super::rig::Rig;
 use bevy::core_pipeline::FullscreenShader;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
@@ -50,37 +49,23 @@ use openxr::sys;
 use openxr::sys::Handle as _;
 use serde::{Deserialize, Serialize};
 
-/// How real things hide virtual ones.
+/// Whether real things hide virtual ones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Occlusion {
     #[default]
     Off,
-    /// One depth sample a pixel: quick, with stepped edges.
-    Hard,
-    /// One sample a pixel of the depth image filtered: smooth, steady edges.
-    Soft,
-    /// Sixteen samples a pixel, feathered: what soft was, at a cost in
-    /// frames. (Here to compare with the new one.)
-    SoftLegacy,
+    /// (The names are the ways there used to be, in settings saved then.)
+    #[serde(alias = "Hard", alias = "Soft", alias = "SoftLegacy")]
+    On,
 }
 
 impl Occlusion {
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Off => Self::Hard,
-            Self::Hard => Self::Soft,
-            Self::Soft => Self::SoftLegacy,
-            Self::SoftLegacy => Self::Off,
-        }
+    pub(crate) fn on(self) -> bool {
+        self == Self::On
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Hard => "on, hard edges (quick)",
-            Self::Soft => "on, soft edges",
-            Self::SoftLegacy => "on, soft edges, legacy (slower)",
-        }
+    pub(crate) fn toggled(self) -> Self {
+        if self.on() { Self::Off } else { Self::On }
     }
 }
 
@@ -112,15 +97,21 @@ impl Plugin for OcclusionPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "occlusion.wgsl");
         bevy::asset::embedded_asset!(app, "occlusion_filter.wgsl");
+        bevy::asset::embedded_asset!(app, "occlusion_copy.wgsl");
         let problem = OcclusionProblem::default();
+        let capture = Capture::default();
         app.init_resource::<Wanted>()
             .insert_resource(problem.clone())
+            .insert_resource(capture.clone())
+            .add_systems(Update, super::occlusion_capture::log_frames)
             .add_plugins(ExtractResourcePlugin::<Wanted>::default())
             .add_systems(PostUpdate, want)
             .add_observer(readable_eye_depth);
         let Some(render) = app.get_sub_app_mut(RenderApp) else { return };
         render
             .insert_resource(problem)
+            .insert_resource(capture)
+            .init_resource::<Readbacks>()
             .init_resource::<RoomDepth>()
             .init_resource::<SpecializedRenderPipelines<OcclusionPipeline>>()
             .add_systems(RenderStartup, init_pipeline)
@@ -129,6 +120,7 @@ impl Plugin for OcclusionPlugin {
                 (
                     acquire.in_set(RenderSystems::PrepareResources).run_if(resource_exists::<OxrSession>),
                     prepare.in_set(RenderSystems::Prepare),
+                    super::occlusion_capture::collect.in_set(RenderSystems::Cleanup),
                 ),
             )
             .add_render_graph_node::<ViewNodeRunner<OcclusionNode>>(Core3d, OcclusionLabel)
@@ -152,7 +144,7 @@ fn want(
     wanted.mode = if root.is_some() { settings.occlusion } else { Occlusion::Off };
     wanted.world_from_tracking = root.map_or(Mat4::IDENTITY, |r| r.to_matrix());
     wanted.hole_count = 0;
-    let (Some(root), true) = (root, wanted.mode != Occlusion::Off) else { return };
+    let (Some(root), true) = (root, wanted.mode.on()) else { return };
     let head = heads.iter().next().map_or(root.translation, |t| t.translation());
     let mut holes: Vec<Vec4> = placed
         .items
@@ -201,9 +193,13 @@ struct Made {
     views: Vec<(Texture, TextureView)>,
     /// Each image's eyes, one at a time (what the filter reads).
     layers: Vec<[TextureView; 2]>,
-    /// The latest image filtered for soft occlusion: both eyes, and each.
+    /// The latest image filtered: both eyes, and each.
     filtered: (Texture, TextureView, [TextureView; 2]),
     sampler: Sampler,
+    /// Where an image is copied to be read back for a capture
+    /// (`occlusion_capture`): the texture, and each eye's layer of it.
+    copied: (Texture, [TextureView; 2]),
+    size: (u32, u32),
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +210,11 @@ struct Latest {
     /// Each eye's depth view: the room's tracking space to it, and its
     /// edges' tangents (left, right, down, up).
     views: [(Mat4, Vec4); 2],
+    /// For a capture's notes: the frame's display time, when the headset
+    /// says the image was taken (0: it doesn't), and the steady clock then.
+    display_time: i64,
+    capture_time: i64,
+    mono: i64,
 }
 
 #[derive(ShaderType, Clone, Copy, Default)]
@@ -226,14 +227,15 @@ struct Eye {
     hole_count: u32,
     /// [`BELOW_M`] in the game world's units.
     below: f32,
-    /// 1: [`Occlusion::Hard`]. 2: [`Occlusion::Soft`]. 0: [`Occlusion::SoftLegacy`].
-    mode: u32,
     holes: [Vec4; HOLES],
 }
 
 /// The filtered image's format: halves, so the far end of the depth range
 /// (kept as 1 - depth) loses nothing.
 const FILTERED: TextureFormat = TextureFormat::Rgba16Float;
+/// The format an image is copied to for a capture: it holds the headset's
+/// 16-bit values whole, and can be drawn to and read back anywhere.
+const COPIED: TextureFormat = TextureFormat::R32Float;
 
 fn ok(result: sys::Result, what: &'static str) -> Result<(), &'static str> {
     if result.into_raw() >= 0 { Ok(()) } else { Err(what) }
@@ -347,6 +349,24 @@ fn make(session: &OxrSession, device: &RenderDevice) -> Result<Made, &'static st
                 ..default()
             })
         });
+        let copy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("room depth, copied"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COPIED,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let copy_each = [0, 1].map(|layer| {
+            copy.create_view(&TextureViewDescriptor {
+                dimension: Some(TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..default()
+            })
+        });
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("room depth, filtered"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -354,7 +374,15 @@ fn make(session: &OxrSession, device: &RenderDevice) -> Result<Made, &'static st
             ..default()
         });
         info!("Occlusion: room depth {}x{}, {} images", state.width, state.height, views.len());
-        Ok(Made { provider, views, layers, filtered: (texture, both, each), sampler })
+        Ok(Made {
+            provider,
+            views,
+            layers,
+            filtered: (texture, both, each),
+            sampler,
+            copied: (copy, copy_each),
+            size: (state.width, state.height),
+        })
     }
 }
 
@@ -369,7 +397,7 @@ fn acquire(
     problem: Res<OcclusionProblem>,
     mut depth: ResMut<RoomDepth>,
 ) {
-    let on = wanted.is_some_and(|w| w.mode != Occlusion::Off);
+    let on = wanted.is_some_and(|w| w.mode.on());
     if on && depth.made.is_none() && !depth.failed {
         match make(&session, &device) {
             Ok(made) => depth.made = Some(made),
@@ -404,9 +432,15 @@ fn acquire(
         fov: sys::Fovf { angle_left: 0.0, angle_right: 0.0, angle_up: 0.0, angle_down: 0.0 },
         pose: sys::Posef::IDENTITY,
     };
+    // (filled by headsets that know of it; the others leave it 0)
+    let mut taken = sys::EnvironmentDepthImageTimestampMETA {
+        ty: sys::EnvironmentDepthImageTimestampMETA::TYPE,
+        next: std::ptr::null(),
+        capture_time: sys::Time::from_nanos(0),
+    };
     let mut image = sys::EnvironmentDepthImageMETA {
         ty: sys::EnvironmentDepthImageMETA::TYPE,
-        next: std::ptr::null(),
+        next: (&raw mut taken).cast(),
         swapchain_index: 0,
         near_z: 0.0,
         far_z: 0.0,
@@ -433,7 +467,15 @@ fn acquire(
         depth.logged = true;
         info!("Occlusion: first depth image (near {}, far {}, image {})", image.near_z, image.far_z, image.swapchain_index);
     }
-    depth.latest = Some(Latest { image: image.swapchain_index as usize, near: image.near_z, far: image.far_z, views });
+    depth.latest = Some(Latest {
+        image: image.swapchain_index as usize,
+        near: image.near_z,
+        far: image.far_z,
+        views,
+        display_time: frame.predicted_display_time.as_nanos(),
+        capture_time: taken.capture_time.as_nanos(),
+        mono: super::occlusion_capture::clocks().0,
+    });
 }
 
 #[derive(Resource)]
@@ -441,9 +483,11 @@ struct OcclusionPipeline {
     layouts: [BindGroupLayoutDescriptor; 2],
     fullscreen: FullscreenShader,
     shader: Handle<Shader>,
-    /// The pass that filters the room's image for soft occlusion.
+    /// The pass that filters the room's image, and the one that copies it
+    /// for a capture: both read one eye's layer of it.
     filter_layout: BindGroupLayoutDescriptor,
     filter: CachedRenderPipelineId,
+    copy: CachedRenderPipelineId,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
@@ -460,7 +504,6 @@ fn init_pipeline(mut commands: Commands, fullscreen: Res<FullscreenShader>, asse
         let entries = (
             uniform_buffer::<ViewUniform>(true),
             if multisampled { texture_depth_2d_multisampled() } else { texture_depth_2d() },
-            texture_2d_array(TextureSampleType::Depth),
             uniform_buffer::<Eye>(false),
             texture_2d_array(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
@@ -480,9 +523,21 @@ fn init_pipeline(mut commands: Commands, fullscreen: Res<FullscreenShader>, asse
         }),
         ..default()
     });
+    let copy = cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("occlusion copy".into()),
+        layout: vec![filter_layout.clone()],
+        vertex: fullscreen.to_vertex_state(),
+        fragment: Some(FragmentState {
+            shader: assets.load("embedded://skate_game/xr/occlusion_copy.wgsl"),
+            targets: vec![Some(ColorTargetState { format: COPIED, blend: None, write_mask: ColorWrites::ALL })],
+            ..default()
+        }),
+        ..default()
+    });
     commands.insert_resource(OcclusionPipeline {
         filter_layout,
         filter,
+        copy,
         layouts: [layout(false), layout(true)],
         fullscreen: fullscreen.clone(),
         shader: assets.load("embedded://skate_game/xr/occlusion.wgsl"),
@@ -528,7 +583,7 @@ fn prepare(
     problem: Res<OcclusionProblem>,
     views: Query<(Entity, &ExtractedView, &Msaa), With<XrCamera>>,
 ) {
-    let (Some(wanted), Some(latest)) = (wanted.filter(|w| w.mode != Occlusion::Off), depth.latest) else { return };
+    let (Some(wanted), Some(latest)) = (wanted.filter(|w| w.mode.on()), depth.latest) else { return };
     for (entity, view, msaa) in &views {
         let multisampled = msaa.samples() > 1;
         let format = if view.hdr { ViewTarget::TEXTURE_FORMAT_HDR } else { TextureFormat::bevy_default() };
@@ -553,11 +608,6 @@ fn prepare(
             far: if latest.far.is_finite() { latest.far } else { 0.0 },
             layer: layer as u32,
             hole_count: wanted.hole_count,
-            mode: match wanted.mode {
-                Occlusion::Hard => 1,
-                Occlusion::Soft => 2,
-                _ => 0,
-            },
             below: BELOW_M * wanted.world_from_tracking.x_axis.truncate().length(),
             holes: wanted.holes,
         };
@@ -584,38 +634,37 @@ impl ViewNode for OcclusionNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let depth = world.resource::<RoomDepth>();
-        let mode = world.get_resource::<Wanted>().map_or(Occlusion::Off, |w| w.mode);
-        let on = mode != Occlusion::Off;
+        let on = world.get_resource::<Wanted>().is_some_and(|w| w.mode.on());
         let (true, Some(latest), Some(made)) = (on, depth.latest, depth.made.as_ref()) else { return Ok(()) };
         let cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<OcclusionPipeline>();
-        let (Some(render_pipeline), Some(view_uniforms), Some((_, room)), Some(eye)) = (
+        let layer = (camera.0 as usize).min(1);
+        let (Some(render_pipeline), Some(filter), Some(view_uniforms), Some(layers), Some(eye)) = (
             cache.get_render_pipeline(pipeline_id.0),
+            cache.get_render_pipeline(pipeline.filter),
             world.resource::<ViewUniforms>().uniforms.binding(),
-            made.views.get(latest.image),
-            depth.eyes.get(camera.0 as usize).and_then(|e| e.as_ref()).and_then(|e| e.binding()),
+            made.layers.get(latest.image),
+            depth.eyes[layer].as_ref().and_then(|e| e.binding()),
         ) else {
             return Ok(());
         };
-        let bind_group = context.render_device().create_bind_group(
+        let device = context.render_device().clone();
+        let room = device.create_bind_group(
+            "occlusion room",
+            &cache.get_bind_group_layout(&pipeline.filter_layout),
+            &BindGroupEntries::single(&layers[layer]),
+        );
+        let bind_group = device.create_bind_group(
             "occlusion",
             &cache.get_bind_group_layout(&pipeline.layouts[pipeline_id.1 as usize]),
-            &BindGroupEntries::sequential((view_uniforms, scene_depth.view(), room, eye, &made.filtered.1, &made.sampler)),
+            &BindGroupEntries::sequential((view_uniforms, scene_depth.view(), eye, &made.filtered.1, &made.sampler)),
         );
-        // Soft: this eye's half of the room's image is filtered first. (Each
-        // frame, not each new image: it is a small image, and the headset
-        // doesn't say which are new.)
-        let layer = (camera.0 as usize).min(1);
-        if let (Occlusion::Soft, Some(filter), Some(layers)) = (mode, cache.get_render_pipeline(pipeline.filter), made.layers.get(latest.image)) {
-            let bind_group = context.render_device().create_bind_group(
-                "occlusion filter",
-                &cache.get_bind_group_layout(&pipeline.filter_layout),
-                &BindGroupEntries::single(&layers[layer]),
-            );
+        // This eye's half of the room's image, drawn over the whole of `to`.
+        let draw_room = |context: &mut RenderContext, label, to: &TextureView, with: &bevy::render::render_resource::RenderPipeline| {
             let mut pass = context.command_encoder().begin_render_pass(&RenderPassDescriptor {
-                label: Some("occlusion filter"),
+                label: Some(label),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &made.filtered.2[layer],
+                    view: to,
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
@@ -624,9 +673,51 @@ impl ViewNode for OcclusionNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(filter);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_pipeline(with);
+            pass.set_bind_group(0, &room, &[]);
             pass.draw(0..3, 0..1);
+        };
+        // It is filtered first. (Each frame, not each new image: it is a
+        // small image, and the headset doesn't say which are new.)
+        draw_room(context, "occlusion filter", &made.filtered.2[layer], filter);
+        // A capture is running: the image as it came is copied out to be read back.
+        if let (Some(_), Some(copy)) = (world.resource::<Capture>().sender(), cache.get_render_pipeline(pipeline.copy)) {
+            draw_room(context, "occlusion copy", &made.copied.1[layer], copy);
+            let (width, height) = made.size;
+            let row_bytes = Readbacks::row_bytes(width);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("room depth, read back"),
+                size: row_bytes as u64 * height as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            context.command_encoder().copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &made.copied.0,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                    aspect: TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row_bytes), rows_per_image: None },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            let (view_from_tracking, tangents) = latest.views[layer];
+            let note = serde_json::json!({
+                "kind": "depth",
+                "layer": layer,
+                "image": latest.image,
+                "xr_time": latest.display_time,
+                "capture_time": latest.capture_time,
+                "mono": latest.mono,
+                "near": latest.near,
+                "far": if latest.far.is_finite() { latest.far } else { 0.0 },
+                "view_from_tracking": view_from_tracking.to_cols_array(),
+                "tangents": tangents.to_array(),
+            });
+            world.resource::<Readbacks>().add(buffer, note, layer, width, height);
         }
         let mut pass = context.command_encoder().begin_render_pass(&RenderPassDescriptor {
             label: Some("occlusion"),
@@ -652,26 +743,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_setting_goes_round_and_reads_old_files() {
-        assert_eq!(Occlusion::Off.next(), Occlusion::Hard, "the quick one comes first");
-        assert_eq!(Occlusion::Hard.next(), Occlusion::Soft);
-        assert_eq!(Occlusion::Soft.next(), Occlusion::SoftLegacy, "the old soft is still there to compare");
-        assert_eq!(Occlusion::SoftLegacy.next(), Occlusion::Off);
+    fn the_setting_is_off_or_on_and_reads_old_files() {
         assert_eq!(Occlusion::default(), Occlusion::Off);
-        for (old, mode) in [("\"Soft\"", Occlusion::Soft), ("\"Hard\"", Occlusion::Hard), ("\"Off\"", Occlusion::Off)] {
+        assert_eq!(Occlusion::Off.toggled(), Occlusion::On);
+        assert_eq!(Occlusion::On.toggled(), Occlusion::Off);
+        // Every way there used to be is on.
+        for (old, mode) in [
+            ("\"Soft\"", Occlusion::On),
+            ("\"SoftLegacy\"", Occlusion::On),
+            ("\"Hard\"", Occlusion::On),
+            ("\"On\"", Occlusion::On),
+            ("\"Off\"", Occlusion::Off),
+        ] {
             assert_eq!(serde_json::from_str::<Occlusion>(old).unwrap(), mode);
         }
+        assert_eq!(serde_json::to_string(&Occlusion::On).unwrap(), "\"On\"");
     }
 
     /// The pass's shader is valid WGSL, with and without MSAA. (A shader
     /// that isn't only shows as a log line on the headset, and no occlusion.)
     #[test]
-    fn the_filter_shader_is_valid() {
-        let text = include_str!("occlusion_filter.wgsl");
-        let module = wgpu::naga::front::wgsl::parse_str(text).unwrap_or_else(|e| panic!("{}", e.emit_to_string(text)));
-        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(text)));
+    fn the_shaders_that_read_the_rooms_image_are_valid() {
+        for text in [include_str!("occlusion_filter.wgsl"), include_str!("occlusion_copy.wgsl")] {
+            let module = wgpu::naga::front::wgsl::parse_str(text).unwrap_or_else(|e| panic!("{}", e.emit_to_string(text)));
+            wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(text)));
+        }
     }
 
     #[test]

@@ -39,7 +39,7 @@ use shade::{Grid, Key, Scale};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "android")]
-mod camera;
+pub(crate) mod camera;
 mod depth;
 mod feed;
 mod reduce;
