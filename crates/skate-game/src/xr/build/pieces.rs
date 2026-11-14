@@ -333,6 +333,19 @@ impl PieceGeometry {
             .collect()
     }
 
+    /// Each post's foot and top: the middle of its lowest and highest ends.
+    pub(crate) fn post_spans(&self) -> Vec<(Vec3, Vec3)> {
+        self.posts
+            .iter()
+            .zip(self.post_places())
+            .map(|(&(first, count), place)| {
+                let heights = self.quads[first..first + count].iter().flatten().map(|p| p.y);
+                let (low, high) = heights.fold((f32::MAX, f32::MIN), |(low, high), y| (low.min(y), high.max(y)));
+                (Vec3::new(place.x, low, place.y), Vec3::new(place.x, high, place.y))
+            })
+            .collect()
+    }
+
     /// Without the posts whose bit is set in `left_out`.
     pub(crate) fn without_posts(mut self, left_out: u32) -> Self {
         // (only rails have posts, and they have no faces known by index)

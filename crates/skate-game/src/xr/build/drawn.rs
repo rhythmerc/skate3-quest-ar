@@ -63,8 +63,9 @@ pub(crate) struct Path {
     /// going straight (a bank).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub eased: bool,
-    /// It has no base down to the surface under it: a rail without posts, a
-    /// deck or pad that is only a slab, to be built in the air.
+    /// It has no base down to the surface under it: a deck or pad that is
+    /// only a slab, to be built in the air. (A rail needs no telling: its
+    /// posts are left out wherever they have nothing to stand on.)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub floating: bool,
 }
@@ -89,7 +90,7 @@ impl PieceKind {
 
     /// Can be left without its base ([`Path::floating`]).
     pub(crate) fn floats(self) -> bool {
-        matches!(self, Self::RailPath | Self::Deck | Self::Pad)
+        matches!(self, Self::Deck | Self::Pad)
     }
 
     /// The fewest nodes it can have.
@@ -268,9 +269,6 @@ fn rail(g: &mut PieceGeometry, path: &Path, line: &[Sample]) {
         if path.nodes[i].p().distance(path.nodes[i + 1].p()) > 3.5 {
             posts.push(path.along(i, 0.5, false, true));
         }
-    }
-    if path.floating {
-        posts.clear();
     }
     for post in posts {
         let (p, top) = (post.p, post.p.y + RAIL_TOP - TUBE);
@@ -611,13 +609,8 @@ mod tests {
     }
 
     #[test]
-    fn floating_a_rail_has_no_posts_and_a_deck_or_pad_is_a_slab_with_an_underside() {
+    fn floating_a_deck_or_pad_is_a_slab_with_an_underside() {
         let facing = |q: &[Vec3; 4]| (quad_normal(q) + (q[3] - q[0]).cross(q[2] - q[0])).normalize();
-        let mut rail = Path { nodes: vec![node(0.0, 2.0, 0.0), node(3.0, 2.0, 0.0), node(6.0, 3.0, 1.0)], ..default() };
-        assert!(!rail.geometry(Piece::new(PieceKind::RailPath)).quads.is_empty());
-        rail.floating = true;
-        let g = rail.geometry(Piece::new(PieceKind::RailPath));
-        assert!(g.quads.is_empty() && g.post_places().is_empty() && g.rails.len() == 1 && !g.rail_quads.is_empty());
 
         // A deck 2 to 3 m up: on the ground it is solid down to it; floating, a slab.
         let mut deck = Path { nodes: vec![node(0.0, 2.0, 0.0), node(4.0, 3.0, 0.0), node(8.0, 3.0, 2.0)], ..default() };
@@ -645,7 +638,7 @@ mod tests {
         assert_eq!(g.quads.iter().filter(|q| facing(q).y > 0.7).count(), g.quads.iter().filter(|q| facing(q).y < -0.7).count());
         real_triangles(&g, "a floating pad");
         // A bowl is in its surface: it doesn't float.
-        assert!(!PieceKind::Pool.floats() && PieceKind::Deck.floats());
+        assert!(!PieceKind::Pool.floats() && !PieceKind::RailPath.floats() && PieceKind::Deck.floats());
     }
 
     #[test]

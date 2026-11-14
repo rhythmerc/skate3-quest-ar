@@ -132,8 +132,8 @@ pub(crate) struct Placed {
     /// Not drawn (outside build mode), still skated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
-    /// Its posts (by bit) that would stand in a bowl and are left out
-    /// (`no_posts_over_bowls`); not saved.
+    /// Its posts (by bit) that would stand over a gap and are left out
+    /// (`no_posts_over_gaps`); not saved.
     #[serde(skip)]
     pub no_posts: u32,
     /// What it is made of; absent (layouts from before finishes, and pieces
@@ -201,7 +201,7 @@ impl Placed {
         self.whole_geometry().without_posts(self.no_posts)
     }
 
-    /// With every post, the ones over a bowl too.
+    /// With every post, the ones over a gap too.
     fn whole_geometry(&self) -> PieceGeometry {
         match &self.path {
             Some(path) => path.geometry(self.piece),
@@ -528,19 +528,24 @@ impl Plugin for BuildPlugin {
             )
             .add_plugins(legend::LegendPlugin)
             .add_plugins(anchor::AnchorPlugin)
-            .add_systems(Update, no_posts_over_bowls.before(sync_pieces))
+            .add_systems(Update, no_posts_over_gaps.before(sync_pieces))
             .add_systems(Update, (sync_pieces, show_build, show_edit, show_drawn, describe, layout::save, drop_after_park_scale));
     }
 }
 
-/// A rail's posts are left out where they would stand in a bowl: which
-/// ones is worked out again whenever the layout changes.
-fn no_posts_over_bowls(rig: Res<Rig>, mut placed: ResMut<PlacedPieces>, mut seen: Local<Option<u64>>) {
-    if placed.busy() || *seen == Some(placed.revision) {
+/// A post is left out when what is under it is this far below its foot (the
+/// piece's own metres), or nothing is.
+const POST_GAP: f32 = 0.2;
+
+/// A rail's posts are left out where they would stand over a gap: which
+/// ones is worked out again whenever the layout or the room changes.
+fn no_posts_over_gaps(rig: Res<Rig>, world: Res<ArWorld>, mut placed: ResMut<PlacedPieces>, mut seen: Local<Option<(u64, u64)>>) {
+    // (before there is a room to stand on, every post stays)
+    if placed.busy() || world.revision == 0 || *seen == Some((placed.revision, world.revision)) {
         return;
     }
-    let metres = placed.park_scale / rig.scale;
-    let masks = posts_over_bowls(&placed.items, metres);
+    let Some(root) = rig.root_transform() else { return };
+    let masks = posts_over_gaps(&world, &placed, &root);
     if placed.items.iter().zip(&masks).any(|(item, mask)| item.no_posts != *mask) {
         let placed = &mut *placed;
         for (item, mask) in placed.items.iter_mut().zip(masks) {
@@ -549,36 +554,30 @@ fn no_posts_over_bowls(rig: Res<Rig>, mut placed: ResMut<PlacedPieces>, mut seen
         // (the collision and the pieces' meshes are made again)
         placed.revision += 1;
     }
-    *seen = Some(placed.revision);
+    *seen = Some((placed.revision, world.revision));
 }
 
-/// For each piece, its posts (by bit) that stand over the inside of a sunk
-/// piece: where that piece has a face under its rim. `metres` is real
-/// metres per metre of a piece at scale 1.
-fn posts_over_bowls(items: &[Placed], metres: f32) -> Vec<u32> {
-    let bowls: Vec<(&Placed, Vec<[Vec3; 4]>)> = items
-        .iter()
-        .filter(|item| item.piece.kind.sunk())
-        .map(|item| (item, item.geometry().quads.into_iter().filter(|q| q.iter().any(|p| p.y < -0.02)).collect()))
-        .collect();
-    items
+/// For each piece, its posts (by bit) with nothing to stand on: under the
+/// post's foot the room and the other pieces are well below it (the inside
+/// of a bowl, the drop between two tables or two platforms, the air under a
+/// rail put up in free placement) or not there at all.
+fn posts_over_gaps(world: &ArWorld, placed: &PlacedPieces, root: &Transform) -> Vec<u32> {
+    let metres = placed.park_scale / root.scale.x;
+    let to_tracking = root.compute_affine().inverse();
+    let down = root.rotation * Vec3::NEG_Y;
+    placed
+        .items
         .iter()
         .map(|item| {
-            if bowls.is_empty() || !item.piece.kind.on_posts() {
+            if !item.piece.kind.on_posts() {
                 return 0;
             }
             let mut mask = 0u32;
-            for (index, place) in item.whole_geometry().post_places().into_iter().enumerate().take(32) {
-                let at = item.from_local(metres, Vec3::new(place.x, 0.0, place.y));
-                let over = bowls.iter().any(|(bowl, faces)| {
-                    let p = bowl.to_local(metres, at);
-                    faces.iter().any(|q| {
-                        let side = |a: Vec3, b: Vec3| (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
-                        let sides = [side(q[0], q[1]), side(q[1], q[2]), side(q[2], q[3]), side(q[3], q[0])];
-                        sides.iter().all(|s| *s >= 0.0) || sides.iter().all(|s| *s <= 0.0)
-                    })
-                });
-                if over {
+            for (index, (foot, top)) in item.whole_geometry().post_spans().into_iter().enumerate().take(32) {
+                let (foot, top) = (item.from_local(metres, foot), item.from_local(metres, top));
+                let under = cast_past(world, placed, root, root.transform_point(top), down, Some(item.id));
+                let gap = POST_GAP * metres * item.scale;
+                if under.is_none_or(|hit| to_tracking.transform_point3(hit.point).y < foot.y - gap) {
                     mask |= 1 << index;
                 }
             }
@@ -1114,7 +1113,7 @@ fn build_controls(
             }
         }
     }
-    // A drawn rail, deck or pad: with its base down to the surface under it, or without (floating).
+    // A drawn deck or pad: with its base down to the surface under it, or without (floating).
     if more && pressed(now.trigger, previous.trigger) {
         match placed.selected {
             Some(id) => {
@@ -2486,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rail_has_no_posts_in_a_bowl() {
+    fn a_rail_has_no_posts_over_a_gap() {
         let item = |id, kind, position: [f32; 3]| Placed {
             id,
             piece: Piece::new(kind),
@@ -2499,21 +2498,44 @@ mod tests {
             tint: None,
             path: None,
         };
+        // A floor 40 m square, open over the bowl as the collision makes it (its hole is the bowl's own to fill).
+        let (lo, hi) = Piece::new(PieceKind::Bowl).geometry().footprint();
+        let strip = |x0: f32, z0: f32, x1: f32, z1: f32| [Vec3::new(x0, 0.0, z0), Vec3::new(x1, 0.0, z0), Vec3::new(x1, 0.0, z1), Vec3::new(x0, 0.0, z1)];
+        let floor = vec![strip(-20.0, -20.0, 20.0, lo.y), strip(-20.0, hi.y, 20.0, 40.0), strip(-20.0, lo.y, lo.x, hi.y), strip(hi.x, lo.y, 20.0, hi.y)];
+        let world = ArWorld { revision: 1, room_quads: floor, ..default() };
         // A rail (posts 2.4 m either side of its middle) with one end over a bowl, and one well clear.
         let bowl = item(1, PieceKind::Bowl, [0.0, 0.0, 0.0]);
         let over = item(2, PieceKind::Rail, [2.4, 0.0, 0.0]);
         let clear = item(3, PieceKind::Rail, [0.0, 0.0, 9.0]);
-        let mut items = vec![bowl, over, clear];
-        let masks = posts_over_bowls(&items, 1.0);
-        assert_eq!(masks, vec![0, 0b01, 0], "the post at the bowl's middle goes, the other stays");
-        let whole = items[1].geometry().quads.len();
-        items[1].no_posts = masks[1];
-        let g = items[1].geometry();
+        // One put up in the air in free placement, and one in the air over a platform it can stand on.
+        let high = item(4, PieceKind::Rail, [0.0, 2.0, -9.0]);
+        let mut placed = PlacedPieces { items: vec![bowl, over, clear, high], ..default() };
+        let masks = posts_over_gaps(&world, &placed, &Transform::IDENTITY);
+        assert_eq!(masks[..3], [0, 0b01, 0], "the post at the bowl's middle goes, the other stays");
+        assert_eq!(masks[3], 0b11, "in the air, it has no posts at all");
+        let whole = placed.items[1].geometry().quads.len();
+        placed.items[1].no_posts = masks[1];
+        let g = placed.items[1].geometry();
         assert_eq!(g.quads.len(), whole - 6);
         assert!(g.quads.iter().flatten().all(|p| p.x > 0.0), "the post left is the far one");
         assert_eq!(g.rail_quads.len(), 6, "the rail itself is whole");
-        assert_ne!(items[1].shape_key(), items[2].shape_key(), "and its mesh is made again");
-        // No bowl: every post.
-        assert_eq!(posts_over_bowls(&items[1..], 1.0), vec![0, 0]);
+        assert_ne!(placed.items[1].shape_key(), placed.items[2].shape_key(), "and its mesh is made again");
+        // A drawn rail from one pad to another, its points on their tops: the post between them,
+        // over the drop, goes; the ones over the pads stay.
+        let pad = |id, x: f32| {
+            let node = |dx: f32, dz: f32| drawn::Node::new(Vec3::new(dx, 1.0, dz), 0.0);
+            Placed { path: Some(drawn::Path { nodes: vec![node(-1.5, -1.5), node(1.5, -1.5), node(1.5, 1.5), node(-1.5, 1.5)], ..default() }), ..item(id, PieceKind::Pad, [x, 0.0, 30.0]) }
+        };
+        let node = |x: f32| drawn::Node::new(Vec3::new(x, 1.0, 0.0), 1.0);
+        let rail = Placed { path: Some(drawn::Path { nodes: vec![node(-0.5), node(4.0), node(8.5)], ..default() }), ..item(7, PieceKind::RailPath, [0.0, 0.0, 30.0]) };
+        let placed = PlacedPieces { items: vec![pad(5, 0.0), pad(6, 8.0), rail], ..default() };
+        let posts = placed.items[2].whole_geometry().post_spans();
+        assert_eq!(posts.len(), 5, "its ends, its middle node, and the middle of each long stretch: {posts:?}");
+        let mask = posts_over_gaps(&world, &placed, &Transform::IDENTITY)[2];
+        for (index, (foot, _)) in posts.iter().enumerate() {
+            let on_a_pad = foot.x < 1.5 || foot.x > 6.5;
+            assert_eq!(mask & (1 << index) == 0, on_a_pad, "the post at x = {}", foot.x);
+        }
     }
+
 }
