@@ -15,8 +15,9 @@ struct Eye {
     hole_count: u32,
     // How far under a mouth's height counts as in the bowl (world units).
     below: f32,
-    // Not 0: one sample of the room's image a pixel (hard edges, quick).
-    hard: u32,
+    // 1: one sample of the room's image a pixel (hard edges, quick). 2: one
+    // of its filtered image (soft). 0: sixteen of the image (the old soft).
+    mode: u32,
     // The mouths of the bowls sunk into real surfaces: the centre (world), and the radius.
     holes: array<vec4<f32>, 4>,
 }
@@ -29,17 +30,40 @@ struct Eye {
 #endif
 @group(0) @binding(2) var room_depth: texture_depth_2d_array;
 @group(0) @binding(3) var<uniform> eye: Eye;
+// The room's image filtered (occlusion_filter.wgsl), read between its texels.
+@group(0) @binding(4) var room_filtered: texture_2d_array<f32>;
+@group(0) @binding(5) var room_sampler: sampler;
 
 // How far along the room's view the real surface at a texel is, metres (0: unknown).
 fn room_distance(texel: vec2<i32>, size: vec2<i32>) -> f32 {
-    let d = textureLoad(room_depth, clamp(texel, vec2(0), size - 1), i32(eye.layer), 0);
+    return metres(textureLoad(room_depth, clamp(texel, vec2(0), size - 1), i32(eye.layer), 0));
+}
+
+// A value of the room's image as metres along its view (0: unknown).
+fn metres(d: f32) -> f32 {
     if d <= 0.0 || d >= 1.0 {
         return 0.0;
     }
-    if eye.far <= 0.0 || eye.far > 1e6 {
+    // (a far plane nearer than the near one: none)
+    if eye.far <= eye.near || eye.far > 1e6 {
         return eye.near / (1.0 - d);
     }
     return eye.near * eye.far / (eye.far - d * (eye.far - eye.near));
+}
+
+// Soft occlusion as Meta's shaders do it: one read of the filtered image,
+// between its texels, and the pixel tested against the means there. On a
+// flat patch that is the mean of sixteen texels, far steadier than any
+// one; at an edge, the near things' answer and the far things', mixed by
+// how much of the patch is which.
+fn seen_softly(image: vec2<f32>, size: vec2<i32>, drawn: f32) -> f32 {
+    let s = textureSampleLevel(room_filtered, room_sampler, image - 0.5 / vec2<f32>(size), i32(eye.layer), 0.0);
+    let near = seen(metres(1.0 - s.x), drawn);
+    let far = seen(metres(1.0 - s.y), drawn);
+    if far - near <= 0.03 {
+        return seen(metres(s.z + 1.0 - s.x), drawn);
+    }
+    return mix(near, far, smoothstep(0.2, 0.8, s.z / max(s.w, 1e-6)));
 }
 
 // 1: seen; 0: behind the real surface. A little past it still counts as on it.
@@ -95,7 +119,10 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4(1.0);
     }
     let size = vec2<i32>(textureDimensions(room_depth).xy);
-    if eye.hard != 0u {
+    if eye.mode == 2u {
+        return vec4(seen_softly(image, size, ahead));
+    }
+    if eye.mode == 1u {
         // The texel the pixel is in, and no other: edges step along the room's texels.
         return vec4(seen(room_distance(vec2<i32>(floor(image * vec2<f32>(size))), size), ahead));
     }

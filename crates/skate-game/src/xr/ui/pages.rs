@@ -284,7 +284,9 @@ fn ar_widgets(world: &World) -> Vec<Widget> {
     match (s.occlusion, *world.resource::<crate::xr::occlusion::OcclusionProblem>().0.lock().unwrap()) {
         (crate::xr::occlusion::Occlusion::Off, _) => {}
         (_, Some(problem)) => w.push(Widget::info(problem)),
-        (crate::xr::occlusion::Occlusion::Soft, _) => w.push(Widget::info("Uses the headset's depth sensing. Soft edges cost frames in a busy park.")),
+        (crate::xr::occlusion::Occlusion::SoftLegacy, _) => {
+            w.push(Widget::info("Uses the headset's depth sensing. The old soft edges, which cost frames: here to compare."))
+        }
         _ => w.push(Widget::info("Uses the headset's depth sensing.")),
     }
     w.extend([
