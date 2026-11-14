@@ -328,6 +328,9 @@ pub(crate) struct Ramp {
     /// Where one plywood sheet ends and the next begins along it (z),
     /// besides at its lips.
     pub joints: Vec<f32>,
+    /// It is drawn open at the back of its decks, on a frame (it is ridden
+    /// as the solid it was).
+    pub hollow: bool,
 }
 
 /// A rail's post: a box, kept track of in [`PieceGeometry::posts`].
@@ -560,6 +563,7 @@ impl Piece {
                 // Its flat is four sheets: two side by side, twice.
                 if let Some(ramp) = g.ramp.as_mut() {
                     ramp.joints = vec![-flat * 0.5, 0.0, flat * 0.5];
+                    ramp.hollow = true;
                 }
             }
             PieceKind::Rail => {

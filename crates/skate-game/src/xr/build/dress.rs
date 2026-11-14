@@ -20,6 +20,9 @@ const EDGE_M: f32 = 0.05;
 /// A coping tube's radius, and how far its top stands over the deck.
 const COPING_M: f32 = 0.032;
 const COPING_PROUD_M: f32 = 0.012;
+/// A hollow ramp's frame: how deep and how thick its timbers are.
+const TIMBER_M: f32 = 0.12;
+const TIMBER_THICK_M: f32 = 0.05;
 /// The plate at a ramp's foot: its length up the ramp at most, and as a share of the ramp.
 const PLATE_M: f32 = 0.3;
 const PLATE_SHARE: f32 = 0.14;
@@ -102,6 +105,45 @@ fn cut(face: &[Corner], axis: usize, value: f32) -> (Vec<Corner>, Vec<Corner>) {
     (below, above)
 }
 
+/// A ramp's ends that stand up off the ground, where a wall closes it or a
+/// frame holds it open: where along it (z), which way is out (z), how high.
+fn backs(ramp: &Ramp) -> Vec<(f32, f32, f32)> {
+    let (Some(first), Some(last)) = (ramp.profile.first(), ramp.profile.last()) else { return Vec::new() };
+    [(first, -1.0), (last, 1.0)].into_iter().filter(|(end, _)| end.y > 0.05).map(|(end, out)| (end.x, out, end.y)).collect()
+}
+
+/// A timber: a box, its grain along its longest side, in pine.
+fn timber(out: &mut Dressed, min: Vec3, max: Vec3, sheet: (u32, u32, u32)) {
+    let size = max - min;
+    if size.min_element() <= 1e-4 {
+        return;
+    }
+    let long = if size.x >= size.y && size.x >= size.z { 0 } else if size.y >= size.z { 1 } else { 2 };
+    let tone = 0.8 + 0.2 * chance(sheet, 3);
+    let color = [tone * 1.04, tone * 0.93, tone * 0.72, 1.0];
+    let shift = Vec2::new(chance(sheet, 1), chance(sheet, 2)) * 7.0;
+    for axis in 0..3 {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        for (side, normal) in [(min[axis], -1.0), (max[axis], 1.0)] {
+            let corner = |a: f32, b: f32| {
+                let mut at = Vec3::ZERO;
+                at[axis] = side;
+                at[u] = a;
+                at[v] = b;
+                let mut n = Vec3::ZERO;
+                n[axis] = normal;
+                // (along the grain, then across it)
+                let across = if u == long { b } else { a };
+                Corner { at, normal: n, uv: Vec2::new(at[long], across + side) + shift }
+            };
+            let face = [corner(min[u], min[v]), corner(max[u], min[v]), corner(max[u], max[v]), corner(min[u], max[v])];
+            let wound = quad_normal(&face.map(|c| c.at));
+            let face = if wound.dot(face[0].normal) >= 0.0 { face } else { [face[0], face[3], face[2], face[1]] };
+            out.face(&face, color);
+        }
+    }
+}
+
 /// Whether a face has any size left.
 fn solid(face: &[Corner]) -> bool {
     face.len() >= 3 && (1..face.len() - 1).any(|i| (face[i].at - face[0].at).cross(face[i + 1].at - face[0].at).length() > 1e-7)
@@ -134,6 +176,10 @@ pub(super) fn sheets(g: &PieceGeometry) -> Option<Dressed> {
         // (a side is one board from end to end of each stretch; what is ridden, and the walls
         // behind it, are sheets across)
         let side = facing.x.abs() > 0.7;
+        // A hollow ramp has no wall behind its decks (the block a raised one stands on stays).
+        if ramp.hollow && !side && facing.y <= 0.02 && q.iter().all(|p| p.y > -1e-4) {
+            continue;
+        }
         let mut parts = vec![face];
         for (axis, cuts) in [(0, &across), (2, &along)] {
             if side && axis == 0 {
@@ -157,6 +203,26 @@ pub(super) fn sheets(g: &PieceGeometry) -> Option<Dressed> {
                 corner.uv += shift;
             }
             out.face(&part, [tone * warm, tone, tone / warm, 1.0]);
+        }
+    }
+    // A hollow ramp's frame, seen through its open backs: a timber under the deck, one on the
+    // ground, one between on a tall ramp, and a stud up the middle behind them.
+    if ramp.hollow {
+        let x = ramp.width * 0.5 - 0.02;
+        for (end, (z, out_z, height)) in backs(ramp).into_iter().enumerate() {
+            let end = end as u32;
+            let slab = |from: f32, to: f32| (z - out_z * from, z - out_z * to);
+            let rail = |out: &mut Dressed, low: f32, high: f32, index: u32| {
+                let (a, b) = slab(0.0, TIMBER_THICK_M);
+                timber(out, Vec3::new(-x, low, a.min(b)), Vec3::new(x, high, a.max(b)), (4, end, index));
+            };
+            rail(&mut out, height - 0.004 - TIMBER_M, height - 0.004, 0);
+            rail(&mut out, 0.0, TIMBER_M.min(height * 0.3), 1);
+            if height > 1.2 {
+                rail(&mut out, (height - TIMBER_M) * 0.5, (height + TIMBER_M) * 0.5, 2);
+            }
+            let (a, b) = slab(TIMBER_THICK_M, TIMBER_THICK_M * 2.0);
+            timber(&mut out, Vec3::new(-TIMBER_M * 0.5, 0.0, a.min(b)), Vec3::new(TIMBER_M * 0.5, height - 0.004, a.max(b)), (4, end, 3));
         }
     }
     Some(out)
@@ -231,7 +297,8 @@ pub(super) fn details(g: &PieceGeometry, wooden: bool) -> Option<Dressed> {
             out.quad([at(-x, here - run) + up, at(x, here - run) + up, at(x, here + run) + up, at(-x, here + run) + up], out_of(stretches[i]), seam);
         }
 
-        // The sheets' edges, down each side under the ridden surface.
+        // The sheets' edges, round each side: under the ridden surface, along the ground, and up
+        // each end that stands off it.
         for side in [-x, x] {
             let normal = Vec3::X * side.signum();
             let off = side + side.signum() * LIFT_M;
@@ -239,8 +306,31 @@ pub(super) fn details(g: &PieceGeometry, wooden: bool) -> Option<Dressed> {
                 let p = profile[i] - points[i] * EDGE_M;
                 Vec2::new(p.x, p.y.max(0.0))
             };
+            let over = |i: usize| Vec2::new(profile[i].x, profile[i].y.min(EDGE_M));
             for i in 0..profile.len() - 1 {
                 out.quad([at(off, profile[i]), at(off, profile[i + 1]), at(off, under(i + 1)), at(off, under(i))], normal, edge);
+                let (a, b) = (profile[i].with_y(0.0), profile[i + 1].with_y(0.0));
+                out.quad([at(off, a), at(off, b), at(off, over(i + 1)), at(off, over(i))], normal, edge);
+            }
+            for (z, out_z, height) in backs(ramp) {
+                let inner = z - out_z * EDGE_M;
+                out.quad([Vec3::new(off, 0.0, z), Vec3::new(off, height, z), Vec3::new(off, height, inner), Vec3::new(off, 0.0, inner)], normal, edge);
+            }
+        }
+        // And round the wall that closes each such end (a hollow ramp has none), with the seams
+        // between its sheets.
+        for (z, out_z, height) in backs(ramp).into_iter().filter(|_| !ramp.hollow) {
+            let normal = Vec3::Z * out_z;
+            let off = z + out_z * LIFT_M;
+            let mut band = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]| {
+                out.quad([Vec3::new(x0, y0, off), Vec3::new(x1, y0, off), Vec3::new(x1, y1, off), Vec3::new(x0, y1, off)], normal, color);
+            };
+            band(-x, 0.0, x, EDGE_M.min(height * 0.5), edge);
+            band(-x, height - EDGE_M.min(height * 0.5), x, height, edge);
+            band(-x, 0.0, -x + EDGE_M, height, edge);
+            band(x - EDGE_M, 0.0, x, height, edge);
+            for &cut in &across(ramp.width) {
+                band(cut - SEAM_M * 0.5, 0.0, cut + SEAM_M * 0.5, height, seam);
             }
         }
 
@@ -284,7 +374,10 @@ mod tests {
             let mesh = sheets(&g).expect("a ramp");
             // Cut along its seams it covers what it did, and faces the way it did.
             let whole: f32 = g.all_quads().map(|q| (quad_normal(q).length() + (q[3] - q[0]).cross(q[2] - q[0]).length()) * 0.5).sum();
-            assert!((area(&mesh) - whole).abs() < whole * 1e-3, "{kind:?}: {} of {whole}", area(&mesh));
+            // (a hollow one has its back walls out and a frame in)
+            if !g.ramp.as_ref().unwrap().hollow {
+                assert!((area(&mesh) - whole).abs() < whole * 1e-3, "{kind:?}: {} of {whole}", area(&mesh));
+            }
             for (t, n) in mesh.positions.chunks_exact(3).zip(mesh.normals.chunks_exact(3)) {
                 let [a, b, c] = [t[0], t[1], t[2]].map(Vec3::from_array);
                 let wound = (b - a).cross(c - a);
@@ -321,6 +414,29 @@ mod tests {
         let mut only: Vec<[u32; 3]> = tones.iter().map(|t| t.2).collect();
         only.dedup();
         assert_eq!(only.len(), 4, "each quarter is its own sheet");
+    }
+
+    #[test]
+    fn a_half_pipe_is_open_behind_its_decks_on_a_frame() {
+        let g = Piece::new(PieceKind::HalfPipe).geometry();
+        let ramp = g.ramp.as_ref().unwrap();
+        assert!(ramp.hollow && backs(ramp).len() == 2);
+        let end = ramp.profile[0].x;
+        // Nothing of it fills the plane of its back but the frame's timbers: far less than the wall did.
+        let mesh = sheets(&g).unwrap();
+        let on_the_back: f32 = mesh
+            .positions
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|p| (p[2] - end).abs() < 1e-4))
+            .map(|t| (Vec3::from_array(t[1]) - Vec3::from_array(t[0])).cross(Vec3::from_array(t[2]) - Vec3::from_array(t[0])).length() * 0.5)
+            .sum();
+        let wall = ramp.width * ramp.profile[0].y;
+        assert!(on_the_back > 0.5 && on_the_back < wall * 0.25, "{on_the_back} of {wall}");
+        // It is ridden as the solid it was: the wall is still there to run into.
+        assert!(g.quads.iter().any(|q| q.iter().all(|p| (p.z - end).abs() < 1e-4)));
+        // A quarter pipe is closed.
+        let quarter = Piece::new(PieceKind::QuarterPipe).geometry();
+        assert!(!quarter.ramp.as_ref().unwrap().hollow);
     }
 
     #[test]
