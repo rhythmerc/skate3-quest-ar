@@ -1801,8 +1801,8 @@ impl PieceAssets {
             return material.clone();
         }
         let look = finish.look();
-        // A ramp in wood is plywood: the photograph's grain, in birch's colour.
-        let plywood = finish == Finish::Wood && kind.plywood() && tint.is_none();
+        // Wood is pale, as the plywood a ramp is built of: the photograph's grain, in birch's colour.
+        let plywood = finish == Finish::Wood && tint.is_none();
         let neutral = tint.is_some() || plywood;
         let texture = look.texture.map(|(bytes, _)| {
             self.textures
@@ -1823,7 +1823,7 @@ impl PieceAssets {
             base_color_texture: texture,
             // Texture coordinates are metres ([`PieceGeometry::uvs`]).
             // (a sheet of plywood's grain is finer than a plank's)
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look.texture.map_or(1.0, |(_, metres)| if plywood { metres * 0.6 } else { metres }))),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look.texture.map_or(1.0, |(_, metres)| if finish == Finish::Wood { metres * 0.6 } else { metres }))),
             perceptual_roughness: look.roughness,
             metallic: look.metallic,
             // (a sunk piece is only its inside: its faces seen from behind, through the surface
@@ -1837,7 +1837,7 @@ impl PieceAssets {
     }
 }
 
-/// Birch plywood, as a ramp is built of.
+/// Birch plywood: the colour of everything in wood, until the player gives it another.
 const PLYWOOD: Color = Color::srgb(0.8, 0.69, 0.52);
 
 /// How a finish is drawn.

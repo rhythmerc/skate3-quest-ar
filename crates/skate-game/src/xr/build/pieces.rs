@@ -273,7 +273,7 @@ impl Tint {
     /// Where colouring a finish starts from: about its own colour.
     pub(crate) fn of(finish: Finish) -> Self {
         match finish {
-            Finish::Wood => Self { hue: 2, light: 3 },
+            Finish::Wood => Self { hue: 2, light: 5 },
             Finish::Brick => Self { hue: 1, light: 3 },
             Finish::Concrete | Finish::Steel => Self { hue: 14, light: 4 },
             Finish::Paint => Self { hue: 14, light: 3 },
